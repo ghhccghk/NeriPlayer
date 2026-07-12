@@ -19,6 +19,7 @@ espressoCore = "3.7.0"
 appcompat = "1.7.1"
 kotlinxSerializationJson = "1.11.0"
 kotlinxSerializationProtobuf = "1.11.0"
+kugouapiKmp = "1.0.3"
 material = "1.14.0"
 constraintlayout = "2.2.2"
 
@@ -70,6 +71,7 @@ androidx-room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 androidx-room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 androidx-room-testing = { module = "androidx.room:room-testing", version.ref = "room" }
 androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
+kugouapi-kmp = { module = "top.ghhccghk.multiplatform.kugouapi:kugouapi-kmp", version.ref = "kugouapiKmp" }
 superlyricapi = { module = "com.github.HChenX:SuperLyricApi", version.ref = "superlyricapi" }
 taglib = { module = "io.github.kyant0:taglib", version.ref = "taglib" }
 tiny-pinyin = { module = "io.github.biezhi:TinyPinyin", version.ref = "tinyPinyin" }
