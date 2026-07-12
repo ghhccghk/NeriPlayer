@@ -315,6 +315,7 @@ private fun youtubeSearchTypeIcon(type: YouTubeExploreSearchType): ImageVector {
         YouTubeExploreSearchType.SONG -> Icons.Outlined.MusicNote
         YouTubeExploreSearchType.VIDEO -> Icons.Filled.PlayCircle
         YouTubeExploreSearchType.CREATOR -> Icons.Filled.AccountCircle
+        SearchSource.KUGOU -> stringResource(R.string.platform_kugou)
     }
 }
 
@@ -1055,6 +1056,11 @@ fun ExploreScreen(
                                     text = stringResource(R.string.explore_link_recognition_placeholder),
                                     style = MaterialTheme.typography.bodyLarge
                                 )
+                            }
+                        }
+                        SearchSource.KUGOU -> {
+                            Box(Modifier.fillMaxSize(), Alignment.Center) {
+                                Text(stringResource(R.string.explore_bili_desc), style = MaterialTheme.typography.bodyLarge)
                             }
                         }
                     }

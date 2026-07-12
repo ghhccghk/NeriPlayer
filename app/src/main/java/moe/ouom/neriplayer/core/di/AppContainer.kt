@@ -233,6 +233,7 @@ object AppContainer {
     val listenTogetherPreferences by lazy { ListenTogetherPreferences(application) }
     val neteaseCookieRepo by lazy { NeteaseCookieRepository(application) }
     val biliCookieRepo by lazy { BiliCookieRepository(application) }
+    val kugouCookieRepo by lazy { moe.ouom.neriplayer.data.auth.kugou.KugouCookieRepository(application) }
     val youtubeAuthRepo by lazy { YouTubeAuthRepository(application) }
     internal val youtubeAuthAutoRefreshManager by lazy {
         YouTubeAuthAutoRefreshManager(
@@ -352,7 +353,18 @@ object AppContainer {
     val biliClient by lazy { BiliClient(biliCookieRepo, client = sharedOkHttpClient) }
     internal val biliSponsorBlockRepository by lazy { BiliSponsorBlockRepository(sharedOkHttpClient) }
     internal val biliVideoSkipRepository by lazy { BiliVideoSkipRepository.getInstance(application) }
+    val kugouClient by lazy {
+        top.ghhccghk.multiplatform.kugouapi.KuGouClient(
+            config = top.ghhccghk.multiplatform.kugouapi.KuGouConfig()
+        ).also { client ->
+            kugouCookieRepo.getCookiesOnce().forEach { (k, v) ->
+                client.cookieJar[k] = v
+            }
+        }
+    }
+
     private val youtubeMusicClientDelegate = lazy {
+    val youtubeMusicClient by lazy {
         YouTubeMusicClient(
             authRepo = youtubeAuthRepo,
             okHttpClient = sharedOkHttpClient,
@@ -409,6 +421,7 @@ object AppContainer {
             youtubeMusicClient = youtubeMusicClient
         )
     }
+    val kugouSearchApi by lazy { moe.ouom.neriplayer.core.api.search.KuGouSearchApi(kugouClient) }
     val listenTogetherApi by lazy { ListenTogetherApi(sharedOkHttpClient) }
     private val listenTogetherOkHttpClient by lazy {
         sharedOkHttpClient.newBuilder()
@@ -506,6 +519,14 @@ object AppContainer {
                 mutableCookies.putIfAbsent("os", "pc")
 
                 neteaseClient.setPersistedCookies(mutableCookies)
+            }
+            .launchIn(scope)
+
+        kugouCookieRepo.cookieFlow
+            .onEach { cookies ->
+                cookies.forEach { (k, v) ->
+                    kugouClient.cookieJar[k] = v
+                }
             }
             .launchIn(scope)
     }

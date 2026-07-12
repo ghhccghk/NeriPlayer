@@ -24,6 +24,7 @@ package moe.ouom.neriplayer.ui.screen
  */
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.Context
 import android.content.pm.PackageManager
@@ -35,6 +36,7 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -1641,6 +1643,7 @@ internal fun shouldBypassCollapsedStoredLyric(rawLyric: String?): Boolean {
     return rawLyric?.let(::hasCollapsedTimedLyricTimeline) == true
 }
 
+@SuppressLint("LocalContextGetResourceValueCall")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
 @Suppress("AssignedValueIsNeverRead")
@@ -6046,5 +6049,6 @@ private fun musicPlatformLabel(platform: MusicPlatform): String {
     return when (platform) {
         MusicPlatform.CLOUD_MUSIC -> stringResource(R.string.platform_netease_short)
         MusicPlatform.QQ_MUSIC -> stringResource(R.string.settings_qq_music)
+        MusicPlatform.KUGOU -> stringResource(R.string.platform_kugou)
     }
 }

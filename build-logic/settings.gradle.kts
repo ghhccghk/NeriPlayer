@@ -1,5 +1,6 @@
 dependencyResolutionManagement {
     repositories {
+        mavenLocal()
         google()
         mavenCentral()
     }
