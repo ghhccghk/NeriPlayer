@@ -56,9 +56,7 @@ import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import moe.ouom.neriplayer.R
-import moe.ouom.neriplayer.activity.BiliQrLoginActivity
-import moe.ouom.neriplayer.activity.KugouQrLoginActivity
-import moe.ouom.neriplayer.activity.YouTubeWebLoginActivity
+import moe.ouom.neriplayer.activity.auth.KugouQrLoginActivity
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.ui.component.sheet.bottomSheetDragBlocker
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.InlineMessage
