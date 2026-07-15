@@ -1678,6 +1678,8 @@ private fun NeriAppContent(
     val preferredQuality by repo.audioQualityFlow.collectAsStateWithLifecycle(initialValue = "exhigh")
     val youtubePreferredQuality by repo.youtubeAudioQualityFlow.collectAsStateWithLifecycle(initialValue = "high")
     val biliPreferredQuality by repo.biliAudioQualityFlow.collectAsStateWithLifecycle(initialValue = "high")
+    val kugouPreferredQuality by repo.kugouAudioQualityFlow.collectAsStateWithLifecycle(initialValue = "128")
+
     val mobileDataFollowDefaultAudioQuality by repo.mobileDataFollowDefaultAudioQualityFlow.collectAsStateWithLifecycle(
         initialValue = startupPlaybackPreferences.mobileDataFollowDefaultAudioQuality
     )
@@ -1690,6 +1692,10 @@ private fun NeriAppContent(
     val mobileDataBiliAudioQuality by repo.mobileDataBiliAudioQualityFlow.collectAsStateWithLifecycle(
         initialValue = startupPlaybackPreferences.mobileDataBiliAudioQuality
     )
+    val mobileDataKugouAudioQuality by repo.mobileDataKugouAudioQualityFlow.collectAsStateWithLifecycle(
+        initialValue = startupPlaybackPreferences.mobileDataKugouAudioQuality
+    )
+
     val currentThemeBackgroundArgb = MaterialTheme.colorScheme.background.toArgb()
     val themeRevealActive =
         themeRevealOriginWindow != null &&
@@ -2601,8 +2607,17 @@ private fun NeriAppContent(
                                 scale,
                                 content = sceneContent
                             )
-                        }
-                    )
+                        },
+                        kugouPreferredQuality = kugouPreferredQuality,
+                        onKuGouQualityChange = { scope.launch { repo.setKuGouAudioQuality(it) } },
+                        mobileDataKugouAudioQuality = mobileDataKugouAudioQuality,
+                        onMobileDataKugouAudioQualityChange = { quality ->
+                            scope.launch {
+                                repo.setMobileDataKugouAudioQuality(quality)
+                            }
+                        },
+
+                        )
 
                     Destinations.Debug.route -> {
                         val debugHomeScrollState = rememberScrollState()
@@ -3026,7 +3041,7 @@ private fun NeriAppContent(
                                         )
                                     }
                                 }
-                                
+
                                 composable(
                                     route = Destinations.BiliPlaylistDetail.route,
                                     arguments = listOf(navArgument("playlistJson") {

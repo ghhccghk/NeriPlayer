@@ -43,6 +43,7 @@ import moe.ouom.neriplayer.core.player.model.normalizePlaybackPitch
 import moe.ouom.neriplayer.core.player.model.normalizePlaybackSpeed
 import moe.ouom.neriplayer.core.player.model.normalizePlaybackVolumeBalance
 import androidx.core.content.edit
+import moe.ouom.neriplayer.data.platform.bili.BiliQuality
 
 private const val PLAYBACK_SNAPSHOT_PREFS = "playback_snapshot_cache"
 private const val PLAYBACK_SNAPSHOT_SCHEMA_VERSION = 2
@@ -60,6 +61,8 @@ private const val PLAYBACK_MOBILE_DATA_YOUTUBE_AUDIO_QUALITY_KEY =
     "mobile_data_youtube_audio_quality"
 private const val PLAYBACK_MOBILE_DATA_BILI_AUDIO_QUALITY_KEY =
     "mobile_data_bili_audio_quality"
+private const val PLAYBACK_MOBILE_DATA_KUGOU_AUDIO_QUALITY_KEY =
+    "mobile_data_kugou_audio_quality"
 private const val PLAYBACK_KEEP_PROGRESS_KEY = "keep_last_playback_progress"
 private const val PLAYBACK_KEEP_MODE_STATE_KEY = "keep_playback_mode_state"
 private const val PLAYBACK_NETEASE_AUTO_SOURCE_SWITCH_KEY = "netease_auto_source_switch"
@@ -102,10 +105,12 @@ data class PlaybackPreferenceSnapshot(
     val audioQuality: String = "exhigh",
     val youtubeAudioQuality: String = "high",
     val biliAudioQuality: String = "high",
+    val kugouAudioQuality: String = "128",
     val mobileDataFollowDefaultAudioQuality: Boolean = true,
     val mobileDataNeteaseAudioQuality: String = DEFAULT_MOBILE_DATA_NETEASE_AUDIO_QUALITY,
     val mobileDataYouTubeAudioQuality: String = DEFAULT_MOBILE_DATA_YOUTUBE_AUDIO_QUALITY,
     val mobileDataBiliAudioQuality: String = DEFAULT_MOBILE_DATA_BILI_AUDIO_QUALITY,
+    val mobileDataKugouAudioQuality: String = DEFAULT_MOBILE_DATA_KUGOU_AUDIO_QUALITY,
     val keepLastPlaybackProgress: Boolean = true,
     val keepPlaybackModeState: Boolean = true,
     val neteaseAutoSourceSwitch: Boolean = true,
@@ -300,6 +305,10 @@ internal fun persistPlaybackPreferenceSnapshot(
                     normalizedSnapshot.mobileDataYouTubeAudioQuality
                 )
                 .putString(
+                    PLAYBACK_MOBILE_DATA_KUGOU_AUDIO_QUALITY_KEY,
+                    normalizedSnapshot.mobileDataKugouAudioQuality
+                )
+                .putString(
                     PLAYBACK_MOBILE_DATA_BILI_AUDIO_QUALITY_KEY,
                     normalizedSnapshot.mobileDataBiliAudioQuality
                 )
@@ -405,6 +414,10 @@ internal fun Preferences.toPlaybackPreferenceSnapshot(): PlaybackPreferenceSnaps
         mobileDataBiliAudioQuality = normalizeMobileDataBiliAudioQuality(
             this[SettingsKeys.MOBILE_DATA_BILI_AUDIO_QUALITY]
                 ?: resolveLegacyMobileDataBiliAudioQuality(legacyMobileDataQuality)
+        ),
+        mobileDataKugouAudioQuality = normalizeMobileDataKugouAudioQuality(
+            this[SettingsKeys.MOBILE_DATA_KUGOU_AUDIO_QUALITY]
+                ?: resolveLegacyMobileDataKugouAudioQuality(legacyMobileDataQuality)
         ),
         keepLastPlaybackProgress = this[SettingsKeys.KEEP_LAST_PLAYBACK_PROGRESS] ?: true,
         keepPlaybackModeState = this[SettingsKeys.KEEP_PLAYBACK_MODE_STATE] ?: true,

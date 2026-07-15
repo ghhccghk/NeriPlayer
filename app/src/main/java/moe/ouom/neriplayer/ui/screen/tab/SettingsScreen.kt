@@ -129,6 +129,7 @@ import moe.ouom.neriplayer.data.settings.generated.AutoSettingsRepository
 import moe.ouom.neriplayer.data.settings.generated.AutoSettingsScopes
 import moe.ouom.neriplayer.data.settings.generated.AutoSettingsSwitchItems
 import moe.ouom.neriplayer.data.settings.normalizeMobileDataBiliAudioQuality
+import moe.ouom.neriplayer.data.settings.normalizeMobileDataKugouAudioQuality
 import moe.ouom.neriplayer.data.settings.normalizeMobileDataNeteaseAudioQuality
 import moe.ouom.neriplayer.data.settings.normalizeMobileDataYouTubeAudioQuality
 import moe.ouom.neriplayer.data.settings.scaledLyricFontSize
@@ -253,6 +254,21 @@ private fun Context.biliQualityLabel(value: String): String {
     }
 }
 
+
+private fun Context.kugouQualityLabel(value: String): String {
+    return when (value) {
+        "super" -> getString(R.string.settings_audio_quality_super)
+        "viper_tape" -> getString(R.string.settings_audio_quality_viper_tape)
+        "viper_clear" -> getString(R.string.settings_audio_quality_viper_clear)
+        "viper_atmos" -> getString(R.string.settings_audio_quality_viper_atmos)
+        "high" -> getString(R.string.settings_audio_quality_high)
+        "flac" -> getString(R.string.settings_audio_quality_exhigh)
+        "320" -> getString(R.string.settings_audio_quality_medium)
+        "128" -> getString(R.string.settings_audio_quality_low)
+        else -> value
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 @Suppress("AssignedValueIsNeverRead")
@@ -270,6 +286,8 @@ fun SettingsScreen(
     onYouTubeQualityChange: (String) -> Unit,
     biliPreferredQuality: String,
     onBiliQualityChange: (String) -> Unit,
+    kugouPreferredQuality: String,
+    onKuGouQualityChange: (String) -> Unit,
     mobileDataFollowDefaultAudioQuality: Boolean,
     onMobileDataFollowDefaultAudioQualityChange: (Boolean) -> Unit,
     mobileDataNeteaseAudioQuality: String,
@@ -278,6 +296,8 @@ fun SettingsScreen(
     onMobileDataYouTubeAudioQualityChange: (String) -> Unit,
     mobileDataBiliAudioQuality: String,
     onMobileDataBiliAudioQualityChange: (String) -> Unit,
+    mobileDataKugouAudioQuality: String,
+    onMobileDataKugouAudioQualityChange: (String) -> Unit,
     devModeEnabled: Boolean,
     onDevModeChange: (Boolean) -> Unit,
     seedColorHex: String,
@@ -449,9 +469,11 @@ fun SettingsScreen(
     var showNeteaseSheet by remember { mutableStateOf(false) }
     var showYouTubeQualityDialog by remember { mutableStateOf(false) }
     var showBiliQualityDialog by remember { mutableStateOf(false) }
+    var showKuGouQualityDialog by remember { mutableStateOf(false) }
     var showMobileDataNeteaseQualityDialog by remember { mutableStateOf(false) }
     var showMobileDataYouTubeQualityDialog by remember { mutableStateOf(false) }
     var showMobileDataBiliQualityDialog by remember { mutableStateOf(false) }
+    var showMobileDataKuGouQualityDialog by remember { mutableStateOf(false) }
     var showDefaultStartDestinationDialog by remember { mutableStateOf(false) }
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showCookieDialog by remember { mutableStateOf(false) }
@@ -788,6 +810,10 @@ fun SettingsScreen(
         context.biliQualityLabel(biliPreferredQuality)
     }
 
+    val kuGouQualityLabel = remember(kugouPreferredQuality) {
+        context.kugouQualityLabel(kugouPreferredQuality)
+    }
+
     val youtubeQualityLabel = remember(youtubePreferredQuality) {
         context.youtubeQualityLabel(youtubePreferredQuality)
     }
@@ -801,14 +827,22 @@ fun SettingsScreen(
     val normalizedMobileDataBiliAudioQuality = remember(mobileDataBiliAudioQuality) {
         normalizeMobileDataBiliAudioQuality(mobileDataBiliAudioQuality)
     }
+    val normalizedMobileDataKuGouAudioQuality = remember(mobileDataKugouAudioQuality) {
+        normalizeMobileDataKugouAudioQuality(mobileDataKugouAudioQuality)
+    }
+
     val mobileDataNeteaseQualityLabel = remember(normalizedMobileDataNeteaseAudioQuality) {
         context.neteaseQualityLabel(normalizedMobileDataNeteaseAudioQuality)
     }
     val mobileDataYouTubeQualityLabel = remember(normalizedMobileDataYouTubeAudioQuality) {
         context.youtubeQualityLabel(normalizedMobileDataYouTubeAudioQuality)
     }
-    val mobileDataBiliQualityLabel = remember(normalizedMobileDataBiliAudioQuality) {
+    val mobileDataBiliQualityLabel = remember (normalizedMobileDataBiliAudioQuality) {
         context.biliQualityLabel(normalizedMobileDataBiliAudioQuality)
+    }
+
+    val mobileDataKugouQualityLabel = remember (normalizedMobileDataKuGouAudioQuality) {
+        context.kugouQualityLabel(normalizedMobileDataKuGouAudioQuality)
     }
 
     val homeStartAvailable =
@@ -1475,6 +1509,9 @@ fun SettingsScreen(
                             biliQualityLabel = biliQualityLabel,
                             biliPreferredQuality = biliPreferredQuality,
                             onBiliQualityChange = onBiliQualityChange,
+                            kugouPreferredQuality = kugouPreferredQuality,
+                            onKuGouQualityChange = onKuGouQualityChange,
+                            kugouQualityLabel = kuGouQualityLabel,
                             mobileDataFollowDefaultAudioQuality = mobileDataFollowDefaultAudioQuality,
                             onMobileDataFollowDefaultAudioQualityChange =
                                 onMobileDataFollowDefaultAudioQualityChange,
@@ -1489,6 +1526,9 @@ fun SettingsScreen(
                             mobileDataBiliQualityLabel = mobileDataBiliQualityLabel,
                             mobileDataBiliAudioQuality = normalizedMobileDataBiliAudioQuality,
                             onMobileDataBiliAudioQualityChange = onMobileDataBiliAudioQualityChange,
+                            mobileDataKugouAudioQuality = mobileDataKugouAudioQuality,
+                            onMobileDataKugouAudioQualityChange = onMobileDataKugouAudioQualityChange,
+                            mobileDataKugouQualityLabel = mobileDataKugouQualityLabel,
                             showQualityDialog = showQualityDialog,
                             onShowQualityDialogChange = { showQualityDialog = it },
                             showYouTubeQualityDialog = showYouTubeQualityDialog,
@@ -1506,7 +1546,11 @@ fun SettingsScreen(
                             showMobileDataBiliQualityDialog = showMobileDataBiliQualityDialog,
                             onShowMobileDataBiliQualityDialogChange = {
                                 showMobileDataBiliQualityDialog = it
-                            }
+                            },
+                            showKugouQualityDialog = showKuGouQualityDialog,
+                            onShowKugouQualityDialogChange = { showKuGouQualityDialog = it },
+                            showMobileDataKugouQualityDialog = showMobileDataKuGouQualityDialog,
+                            onShowMobileDataKugouQualityDialogChange = { showMobileDataKuGouQualityDialog = it}
                         )
                     }
                 }

@@ -113,6 +113,8 @@ class SettingsRepository(private val context: Context) {
 
     val biliAudioQualityFlow: Flow<String> =
         dataStoreSettingFlow { it[SettingsKeys.BILI_AUDIO_QUALITY] ?: "high" }
+    val kugouAudioQualityFlow: Flow<String> =
+        dataStoreSettingFlow { it[SettingsKeys.KUGOU_AUDIO_QUALITY] ?: "128" }
 
     val mobileDataFollowDefaultAudioQualityFlow: Flow<Boolean> =
         dataStoreSettingFlow { prefs ->
@@ -148,6 +150,16 @@ class SettingsRepository(private val context: Context) {
             normalizeMobileDataBiliAudioQuality(
                 prefs[SettingsKeys.MOBILE_DATA_BILI_AUDIO_QUALITY]
                     ?: resolveLegacyMobileDataBiliAudioQuality(
+                        prefs[SettingsKeys.MOBILE_DATA_DOWNGRADE_QUALITY]
+                    )
+            )
+        }
+
+    val mobileDataKugouAudioQualityFlow: Flow<String> =
+        dataStoreSettingFlow { prefs ->
+            normalizeMobileDataKugouAudioQuality(
+                prefs[SettingsKeys.MOBILE_DATA_KUGOU_AUDIO_QUALITY]
+                    ?: resolveLegacyMobileDataKugouAudioQuality(
                         prefs[SettingsKeys.MOBILE_DATA_DOWNGRADE_QUALITY]
                     )
             )
@@ -586,6 +598,12 @@ class SettingsRepository(private val context: Context) {
         updatePlaybackPreferenceSnapshot(context) { it.copy(biliAudioQuality = value) }
     }
 
+    suspend fun setKuGouAudioQuality(value: String) {
+        context.dataStore.edit { it[SettingsKeys.KUGOU_AUDIO_QUALITY] = value }
+        updatePlaybackPreferenceSnapshot(context) { it.copy(kugouAudioQuality = value) }
+
+    }
+
     suspend fun setMobileDataFollowDefaultAudioQuality(enabled: Boolean) {
         context.dataStore.edit {
             it[SettingsKeys.MOBILE_DATA_FOLLOW_DEFAULT_AUDIO_QUALITY] = enabled
@@ -622,6 +640,16 @@ class SettingsRepository(private val context: Context) {
         }
         updatePlaybackPreferenceSnapshot(context) {
             it.copy(mobileDataBiliAudioQuality = normalized)
+        }
+    }
+
+    suspend fun setMobileDataKugouAudioQuality(value: String){
+        val normalized = normalizeMobileDataKugouAudioQuality(value)
+        context.dataStore.edit {
+            it[SettingsKeys.MOBILE_DATA_KUGOU_AUDIO_QUALITY] = normalized
+        }
+        updatePlaybackPreferenceSnapshot(context) {
+            it.copy(mobileDataKugouAudioQuality = normalized)
         }
     }
 
