@@ -93,8 +93,14 @@ internal fun SettingsAudioQualitySection(
     biliQualityLabel: String,
     biliPreferredQuality: String,
     onBiliQualityChange: (String) -> Unit,
+    kugouQualityLabel: String,
+    kugouPreferredQuality: String,
+    onKuGouQualityChange: (String) -> Unit,
     mobileDataFollowDefaultAudioQuality: Boolean,
     onMobileDataFollowDefaultAudioQualityChange: (Boolean) -> Unit,
+    mobileDataKugouQualityLabel: String,
+    mobileDataKugouAudioQuality: String,
+    onMobileDataKugouAudioQualityChange: (String) -> Unit,
     mobileDataNeteaseQualityLabel: String,
     mobileDataNeteaseAudioQuality: String,
     onMobileDataNeteaseAudioQualityChange: (String) -> Unit,
@@ -110,11 +116,16 @@ internal fun SettingsAudioQualitySection(
     onShowYouTubeQualityDialogChange: (Boolean) -> Unit,
     showBiliQualityDialog: Boolean,
     onShowBiliQualityDialogChange: (Boolean) -> Unit,
+    showKugouQualityDialog: Boolean,
+    onShowKugouQualityDialogChange: (Boolean) -> Unit,
     showMobileDataNeteaseQualityDialog: Boolean,
     onShowMobileDataNeteaseQualityDialogChange: (Boolean) -> Unit,
     showMobileDataYouTubeQualityDialog: Boolean,
     onShowMobileDataYouTubeQualityDialogChange: (Boolean) -> Unit,
     showMobileDataBiliQualityDialog: Boolean,
+    onShowMobileDataBiliQualityDialogChange: (Boolean) -> Unit,
+    showMobileDataKugouQualityDialog: Boolean,
+    onShowMobileDataKugouQualityDialogChange: (Boolean) -> Unit,
     onShowMobileDataBiliQualityDialogChange: (Boolean) -> Unit,
     highlightTargetId: String? = null,
     highlightPulse: Int = 0,
@@ -180,6 +191,14 @@ internal fun SettingsAudioQualitySection(
                 highlightTargetId = highlightTargetId,
                 highlightPulse = highlightPulse,
                 onHighlightFinished = onHighlightFinished
+            )
+
+            AudioQualityListItem(
+                setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.KUGOU_AUDIO_QUALITY),
+                valueLabel = kugouQualityLabel,
+                preferredQuality = kugouPreferredQuality,
+                iconRes = R.drawable.ic_kugou,
+                onClick = { onShowKugouQualityDialogChange(true) }
             )
 
             AutoSettingsListItem(
@@ -258,6 +277,16 @@ internal fun SettingsAudioQualitySection(
                     highlightPulse = highlightPulse,
                     onHighlightFinished = onHighlightFinished
                 )
+
+                AudioQualityListItem(
+                    setting = AutoSettingsMetadata.requireSetting(
+                        AutoSettingsKeys.MOBILE_DATA_KUGOU_AUDIO_QUALITY
+                    ),
+                    valueLabel = mobileDataKugouQualityLabel,
+                    preferredQuality = mobileDataKugouAudioQuality,
+                    iconRes = R.drawable.ic_kugou,
+                    onClick = { onShowMobileDataKugouQualityDialogChange(true) }
+                )
             }
         }
     }
@@ -328,6 +357,29 @@ internal fun SettingsAudioQualitySection(
         )
     }
 
+
+    if (showKugouQualityDialog) {
+        QualityOptionsDialog(
+            title = stringResource(R.string.settings_kugou_audio_quality),
+            selectedValue = kugouPreferredQuality,
+            options = listOf(
+                "super" to stringResource(R.string.settings_audio_quality_super),
+                "viper_tape" to stringResource(R.string.settings_audio_quality_viper_tape),
+                "viper_clear" to stringResource(R.string.settings_audio_quality_viper_clear),
+                "viper_atmos" to stringResource(R.string.settings_audio_quality_viper_atmos),
+                "high" to stringResource(R.string.settings_audio_quality_high),
+                "flac" to stringResource(R.string.settings_audio_quality_exhigh),
+                "320" to stringResource(R.string.settings_audio_quality_medium),
+                "128" to stringResource(R.string.settings_audio_quality_low)
+            ),
+            onDismiss = { onShowKugouQualityDialogChange(false) },
+            onSelect = { level ->
+                onKuGouQualityChange(level)
+                onShowKugouQualityDialogChange(false)
+            }
+        )
+    }
+
     if (showMobileDataNeteaseQualityDialog) {
         QualityOptionsDialog(
             title = stringResource(R.string.settings_mobile_data_netease_audio_quality),
@@ -390,6 +442,28 @@ internal fun SettingsAudioQualitySection(
                 if (level == BILI_DOLBY_QUALITY && mobileDataBiliAudioQuality != level) {
                     audioQualityNotice = AudioQualityNotice.BiliDolby
                 }
+            }
+        )
+    }
+
+    if (showMobileDataKugouQualityDialog) {
+        QualityOptionsDialog(
+            title = stringResource(R.string.settings_mobile_data_kugou_audio_quality),
+            selectedValue = mobileDataKugouAudioQuality,
+            options = listOf(
+                "super" to stringResource(R.string.settings_audio_quality_super),
+                "viper_tape" to stringResource(R.string.settings_audio_quality_viper_tape),
+                "viper_clear" to stringResource(R.string.settings_audio_quality_viper_clear),
+                "viper_atmos" to stringResource(R.string.settings_audio_quality_viper_atmos),
+                "high" to stringResource(R.string.settings_audio_quality_high),
+                "flac" to stringResource(R.string.settings_audio_quality_exhigh),
+                "320" to stringResource(R.string.settings_audio_quality_medium),
+                "128" to stringResource(R.string.settings_audio_quality_low)
+            ),
+            onDismiss = { onShowMobileDataKugouQualityDialogChange(false) },
+            onSelect = { level ->
+                onMobileDataKugouAudioQualityChange(level)
+                onShowMobileDataKugouQualityDialogChange(false)
             }
         )
     }
