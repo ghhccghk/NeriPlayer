@@ -104,6 +104,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.core.logging.NPLogger
 import androidx.lifecycle.lifecycleScope
+import moe.ouom.neriplayer.ui.screen.tab.settings.miuix.MiuixSettingsSegmentedTabs
 
 class KugouLoginActivity : ComponentActivity() {
 
@@ -192,26 +193,12 @@ class KugouLoginActivity : ComponentActivity() {
                     .navigationBarsPadding()
                     .imePadding()
             ) {
-                // Tab row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    tabLabels.forEachIndexed { index, label ->
-                        TextButton(onClick = { selectedTab = index }) {
-                            Text(
-                                text = label,
-                                color = if (selectedTab == index)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
+                MiuixSettingsSegmentedTabs(
+                    labels = tabLabels,
+                    selectedIndex = selectedTab,
+                    onSelectedIndexChange = { selectedTab = it },
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
 
                 AnimatedContent(
                     targetState = selectedTab,
