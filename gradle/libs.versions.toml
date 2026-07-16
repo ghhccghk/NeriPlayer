@@ -119,6 +119,7 @@ zxing-core = { module = "com.google.zxing:core", version.ref = "zxingCore" }
 eclipse-jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version = "6.9.0.202403050737-r" }
 reorderable = { module = "org.burnoutcrew.composereorderable:reorderable", version.ref = "reorderable" }
 androidx-foundation-layout = { group = "androidx.compose.foundation", name = "foundation-layout", version.ref = "foundationLayout" }
+foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "foundation" }
 
 
 [plugins]
