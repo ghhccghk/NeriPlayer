@@ -48,6 +48,7 @@ javascriptengine = "1.0.0"
 webkit = "1.15.0"
 lyriconProvider = "0.1.66"
 zxingCore = "3.5.3"
+foundation = "1.11.4"
 
 [libraries]
 accompanist-navigation-animation = { module = "com.google.accompanist:accompanist-navigation-animation", version.ref = "accompanistNavigationAnimation" }
@@ -112,6 +113,7 @@ zxing-core = { module = "com.google.zxing:core", version.ref = "zxingCore" }
 eclipse-jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version = "6.9.0.202403050737-r" }
 reorderable = { module = "org.burnoutcrew.composereorderable:reorderable", version.ref = "reorderable" }
 androidx-foundation-layout = { group = "androidx.compose.foundation", name = "foundation-layout", version.ref = "foundationLayout" }
+foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "foundation" }
 
 
 [plugins]

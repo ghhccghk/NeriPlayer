@@ -55,7 +55,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.activity.auth.BiliQrLoginActivity
-import moe.ouom.neriplayer.activity.auth.KugouQrLoginActivity
+import moe.ouom.neriplayer.activity.auth.KugouLoginActivity
 import moe.ouom.neriplayer.activity.auth.YouTubeWebLoginActivity
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.ui.component.sheet.bottomSheetDragBlocker
@@ -398,7 +398,7 @@ internal fun SettingsKugouAuthDialogs(
         } ?: run {
             val defaultBrowserLogin: () -> Unit = {
                 onInlineMsgChange(null)
-                val intent = Intent(context, KugouQrLoginActivity::class.java)
+                val intent = Intent(context, KugouLoginActivity::class.java)
                 kugouLoginLauncher.launch(intent)
 
             }

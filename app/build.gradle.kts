@@ -234,6 +234,7 @@ android.applicationVariants.all {
 
 dependencies {
     implementation(project(":ksp-annotations"))
+    implementation(libs.foundation)
     ksp(project(":ksp-processor"))
 
     implementation(libs.androidx.core.ktx)
