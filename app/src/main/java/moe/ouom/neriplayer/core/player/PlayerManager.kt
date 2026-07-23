@@ -386,6 +386,12 @@ object PlayerManager {
             publishPreferredQualityKeys()
         }
 
+    internal var kuGouPreferredQuality: String = "128"
+        set(value) {
+            field = value
+            publishPreferredQualityKeys()
+        }
+
     private val _preferredQualityKeys = MutableStateFlow(PreferredQualityKeys())
 
     /**
@@ -408,6 +414,7 @@ object PlayerManager {
     internal var mobileDataNeteaseAudioQuality: String = "standard"
     internal var mobileDataYouTubeAudioQuality: String = "low"
     internal var mobileDataBiliAudioQuality: String = "low"
+    internal var mobileDatakuGouPreferredQuality: String = "128"
     internal var playbackFadeInEnabled = false
     internal var playbackCrossfadeNextEnabled = false
     internal var playbackFadeInDurationMs = DEFAULT_FADE_DURATION_MS
