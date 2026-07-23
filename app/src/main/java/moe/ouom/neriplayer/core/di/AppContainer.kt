@@ -189,7 +189,7 @@ private data class YouTubeAuthWarmBootstrapKey(
 )
 
 private fun moe.ouom.neriplayer.data.auth.youtube.YouTubeAuthBundle.toWarmBootstrapKey():
-    YouTubeAuthWarmBootstrapKey {
+        YouTubeAuthWarmBootstrapKey {
     val normalized = normalized()
     return YouTubeAuthWarmBootstrapKey(
         hasEffectiveAuth = normalized.hasEffectiveAuth(),
@@ -325,7 +325,6 @@ object AppContainer {
     }
 
     val biliClient by lazy { BiliClient(biliCookieRepo, client = sharedOkHttpClient) }
-    private val youtubeMusicClientDelegate = lazy {
 
     val kugouClient by lazy {
         KugouClientWrapper(
@@ -335,7 +334,7 @@ object AppContainer {
         )
     }
 
-    val youtubeMusicClient by lazy {
+    private val youtubeMusicClientDelegate = lazy {
         YouTubeMusicClient(
             authRepo = youtubeAuthRepo,
             okHttpClient = sharedOkHttpClient,
@@ -564,7 +563,7 @@ object AppContainer {
 
     private fun cancelYouTubeCalls() {
         val calls = sharedOkHttpClient.dispatcher.queuedCalls() +
-            sharedOkHttpClient.dispatcher.runningCalls()
+                sharedOkHttpClient.dispatcher.runningCalls()
         calls.filter { call -> isYouTubeHost(call.request().url.host) }
             .forEach { call -> call.cancel() }
     }

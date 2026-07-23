@@ -122,6 +122,7 @@ object SearchManager {
         return when (platform) {
             MusicPlatform.CLOUD_MUSIC -> AppContainer.cloudMusicSearchApi
             MusicPlatform.QQ_MUSIC -> AppContainer.qqMusicSearchApi
+            MusicPlatform.KUGOU -> AppContainer.kugouSearchApi
         }
     }
 

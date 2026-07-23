@@ -19,7 +19,7 @@ espressoCore = "3.7.0"
 appcompat = "1.7.1"
 kotlinxSerializationJson = "1.9.0"
 kotlinxSerializationProtobuf = "1.9.0"
-kugouapiKmp = "1.0.3"
+kugouapiKmp = "1.0.4"
 material = "1.12.0"
 constraintlayout = "2.2.1"
 
