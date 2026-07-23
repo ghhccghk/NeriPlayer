@@ -6,7 +6,7 @@ on:
       target_ref:
         description: Branch, tag, or commit SHA to release
         required: true
-        default: master
+        default: main
         type: string
 
 jobs:
@@ -14,6 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # 将 Secrets 导入到 Job 级别 env 中以便 steps.if 条件进行检测
+    env:
+      KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,11 +35,10 @@ jobs:
           cache: gradle
 
       - name: Decode keystore
+        if: ${{ env.KEYSTORE_B64 != '' }}
         run: |
           mkdir -p app
           echo "$KEYSTORE_B64" | base64 -d > app/neri.jks
-        env:
-          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
 
       - name: Grant execute permission
         run: chmod +x gradlew
@@ -55,15 +59,27 @@ jobs:
           echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
           echo "previous_tag=${previous_tag}" >> "$GITHUB_OUTPUT"
 
+      # 如果有证书，进行签名打包
       - name: Build signed Release APKs
+        if: ${{ env.KEYSTORE_B64 != '' }}
         run: |
           ./gradlew clean assembleRelease \
             -PbuildAllReleaseAbis=true \
             -PbuildVersionTimestamp=${{ steps.meta.outputs.release_time }} \
             -PKEYSTORE_FILE=neri.jks \
-            -PKEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} \
+            -PKEYSTORE_PASSWORD=$KEYSTORE_PASSWORD \
             -PKEY_ALIAS=key0 \
-            -PKEY_PASSWORD=${{ secrets.KEY_PASSWORD }} \
+            -PKEY_PASSWORD=$KEY_PASSWORD \
+            --warning-mode all --stacktrace
+
+      # 如果没有证书，自动进行未签名打包
+      - name: Build unsigned Release APKs (Fallback)
+        if: ${{ env.KEYSTORE_B64 == '' }}
+        run: |
+          ./gradlew clean assembleRelease \
+            -PbuildAllReleaseAbis=true \
+            -PbuildVersionTimestamp=${{ steps.meta.outputs.release_time }} \
+            -PallowUnsignedRelease=true \
             --warning-mode all --stacktrace
 
       - name: Generate release notes
