@@ -1196,6 +1196,104 @@ fun PlaylistCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun KuGouPlaylistCard(
+    playlist: PlaylistSummary,
+    isFavorite: Boolean,
+    onClick: () -> Unit,
+    onShowSnackbar: (String) -> Unit = {},
+    offlineMode: Boolean = false
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val favoriteRepo = remember(context) { FavoritePlaylistRepository.getInstance(context) }
+    var showMenu by remember { mutableStateOf(false) }
+
+    val unfavoritedText = stringResource(R.string.home_unfavorited)
+    val favoriteSuccessText = stringResource(R.string.favorite_success)
+
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showMenu = true }
+            )
+    ) {
+        AsyncImage(
+            model = fastScrollableImageRequest(
+                context = context,
+                data = playlist.picUrl,
+                sizePx = 384,
+                offlineMode = offlineMode
+            ),
+            contentDescription = playlist.name,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+        )
+        Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)) {
+            Text(
+                text = playlist.name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                text = stringResource(
+                    R.string.home_play_count_format,
+                    formatPlayCount(context, playlist.playCount),
+                    playlist.trackCount
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Clip
+            )
+        }
+
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false }
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isFavorite) {
+                            stringResource(R.string.home_unfavorite_playlist)
+                        } else {
+                            stringResource(R.string.home_favorite_playlist)
+                        }
+                    )
+                },
+                onClick = {
+                    showMenu = false
+                    scope.launch {
+                        if (isFavorite) {
+                            favoriteRepo.removeFavorite(playlist.id, "netease")
+                            onShowSnackbar(unfavoritedText)
+                        } else {
+                            favoriteRepo.addFavorite(
+                                id = playlist.id,
+                                name = playlist.name,
+                                coverUrl = playlist.picUrl,
+                                trackCount = playlist.trackCount,
+                                source = "netease",
+                                songs = emptyList()
+                            )
+                            onShowSnackbar(favoriteSuccessText)
+                        }
+                    }
+                }
+            )
+        }
+    }
+}
+
+
 @Composable
 private fun YtMusicPlaylistCard(
     playlist: YouTubeMusicPlaylist,

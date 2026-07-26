@@ -66,6 +66,7 @@ import moe.ouom.neriplayer.ui.screen.artist.YouTubeMusicCreatorDetailScreen
 import moe.ouom.neriplayer.ui.screen.artist.YouTubeMusicCreatorItemsScreen
 import moe.ouom.neriplayer.ui.screen.playlist.BiliPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteaseAlbumDetailScreen
+import moe.ouom.neriplayer.ui.screen.playlist.KugouPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteasePlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.YouTubeMusicPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.tab.ExploreScreen
@@ -106,6 +107,7 @@ internal sealed class ExploreSelectedItem {
         val creator: YouTubeMusicCreatorSummary,
         val section: YouTubeMusicCreatorSection
     ) : ExploreSelectedItem()
+    data class Kugou(val playlist: PlaylistSummary) : ExploreSelectedItem()
 }
 
 private val ExploreSelectedItem?.navigationDepth: Int
@@ -404,6 +406,17 @@ fun ExploreHostScreen(
                                     captureExploreScrollPosition()
                                     openExploreSelectedItem(ExploreSelectedItem.NeteaseArtist(artist))
                                 },
+                                onKugouPlaylistClick = { pl ->
+                                    captureExploreScrollPosition()
+                                    AppContainer.playlistUsageRepo.recordOpen(
+                                        id = pl.id,
+                                        name = pl.name,
+                                        picUrl = pl.picUrl,
+                                        trackCount = pl.trackCount,
+                                        source = "kugou"
+                                    )
+                                    selected = ExploreSelectedItem.Kugou(pl)
+                                },
                                 onSongClick = onSongClick,
                                 onSongPlayPreservingQueue = onSongPlayPreservingQueue,
                                 onSongPlayNext = onSongPlayNext,
@@ -517,6 +530,15 @@ fun ExploreHostScreen(
                                     section = current.section,
                                     creatorName = current.creator.title,
                                     onBack = ::closeSelectedDetail,
+                                    onSongClick = onSongClick,
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is ExploreSelectedItem.Kugou -> {
+                                KugouPlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    onBack = { selected = null },
                                     onSongClick = onSongClick,
                                     offlineMode = offlineMode
                                 )

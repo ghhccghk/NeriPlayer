@@ -35,6 +35,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.core.api.bili.BiliClient
 import moe.ouom.neriplayer.core.api.bili.buildBiliPartSong
@@ -192,7 +196,10 @@ data class ExploreUiState(
     val isNeteaseLoggedIn: Boolean = false,
     val ytMusicPlaylists: List<YouTubeMusicPlaylist> = emptyList(),
     val ytMusicPlaylistsLoading: Boolean = false,
-    val ytMusicPlaylistsError: String? = null
+    val ytMusicPlaylistsError: String? = null,
+    val kugouPlaylists: List<PlaylistSummary> = emptyList(),
+    val kugouPlaylistsLoading: Boolean = false,
+    val kugouPlaylistsError: String? = null
 )
 
 internal fun ExploreUiState.withYouTubeDisabled(): ExploreUiState {
@@ -318,6 +325,7 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
     private var searchMoreJob: Job? = null
     private var ytMusicPlaylistsJob: Job? = null
     private var ytMusicPlaylistsPending = false
+    private var kugouPlaylistsJob: Job? = null
     private var searchRequestVersion = 0L
     private var youtubeEnabled = YouTubeFeatureGate.isEnabled()
 
@@ -1448,6 +1456,69 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+    }
+
+    /** 加载 酷狗 排行榜/歌单 */
+    fun loadKugouPlaylists() {
+        if (kugouPlaylistsJob?.isActive == true) return
+        _uiState.value = _uiState.value.copy(kugouPlaylistsLoading = true, kugouPlaylistsError = null)
+        NPLogger.d(TAG, "loadKugouPlaylists start")
+        kugouPlaylistsJob = viewModelScope.launch {
+            try {
+                val response = withContext(Dispatchers.IO) {
+                    AppContainer.kugouClient.rank.getList()
+                }
+                val playlists = parseKugouPlaylists(response)
+                NPLogger.d(TAG, "loadKugouPlaylists success: count=${playlists.size}")
+                _uiState.value = _uiState.value.copy(
+                    kugouPlaylistsLoading = false,
+                    kugouPlaylists = playlists,
+                    kugouPlaylistsError = null
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                NPLogger.e(TAG, "loadKugouPlaylists failed", e)
+                _uiState.value = _uiState.value.copy(
+                    kugouPlaylistsLoading = false,
+                    kugouPlaylistsError = e.message ?: app.getString(R.string.github_sync_failed_message)
+                )
+            } finally {
+                kugouPlaylistsJob = null
+            }
+        }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun parseKugouPlaylists(response: top.ghhccghk.multiplatform.kugouapi.core.KuGouResponse): List<PlaylistSummary> {
+        val result = mutableListOf<PlaylistSummary>()
+        try {
+            if (response.status != 200) return emptyList()
+            val data = response.body["data"]?.jsonObject ?: return emptyList()
+            val arr = data["info"]?.jsonArray ?: return emptyList()
+            for (i in arr.indices) {
+                val obj = arr[i].jsonObject
+                val resp = obj["extra"]
+                    ?.jsonObject
+                    ?.get("resp")
+                    ?.jsonObject
+                val picUrl = (obj["banner7url"]?.jsonPrimitive?.content ?: "")
+                    .ifBlank { obj["banner"]?.jsonPrimitive?.content ?: "" }
+                    .replace("/{size}/", "/")
+                result.add(
+                    PlaylistSummary(
+                        id = obj["rankid"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        name = obj["rankname"]?.jsonPrimitive?.content
+                            ?: obj["name"]?.jsonPrimitive?.content ?: "",
+                        picUrl = picUrl,
+                        playCount = obj["play_times"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        trackCount = resp?.get("all_total")?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            NPLogger.e(TAG, "parseKugouPlaylists error", e)
+        }
+        return result
     }
 
     private fun disableYouTubeSource() {

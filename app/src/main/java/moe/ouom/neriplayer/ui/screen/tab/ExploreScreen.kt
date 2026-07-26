@@ -218,19 +218,21 @@ internal fun exploreSearchSourceDisplayOrder(
     youtubeEnabled: Boolean
 ): List<SearchSource> {
     return if (!youtubeEnabled) {
-        listOf(SearchSource.NETEASE, SearchSource.BILIBILI, SearchSource.LINK_RECOGNITION)
+        listOf(SearchSource.NETEASE, SearchSource.BILIBILI, SearchSource.LINK_RECOGNITION,SearchSource.KUGOU)
     } else if (isInternational) {
         listOf(
             SearchSource.YOUTUBE_MUSIC,
             SearchSource.NETEASE,
             SearchSource.BILIBILI,
             SearchSource.LINK_RECOGNITION
+            SearchSource.KUGOU
         )
     } else {
         listOf(
             SearchSource.NETEASE,
             SearchSource.BILIBILI,
             SearchSource.YOUTUBE_MUSIC,
+            SearchSource.KUGOU
             SearchSource.LINK_RECOGNITION
         )
     }
@@ -336,6 +338,7 @@ fun ExploreScreen(
     onYouTubeMusicPlaylistClick: (YouTubeMusicPlaylist) -> Unit = {},
     onYouTubeCreatorClick: (YouTubeMusicCreatorSummary) -> Unit = {},
     onNeteaseArtistClick: (NeteaseArtistSummary) -> Unit = {},
+    onKugouPlaylistClick: (PlaylistSummary) -> Unit = {},
     onSongClick: (List<SongItem>, Int) -> Unit = { _, _ -> },
     onSongPlayPreservingQueue: (SongItem) -> Unit = {},
     onSongPlayNext: (SongItem) -> Unit = {},
@@ -515,6 +518,9 @@ fun ExploreScreen(
         }
         if (currentSource == SearchSource.YOUTUBE_MUSIC && ui.ytMusicPlaylists.isEmpty()) {
             vm.loadYtMusicPlaylists()
+        }
+        if (currentSource == SearchSource.KUGOU && ui.kugouPlaylists.isEmpty() && !ui.kugouPlaylistsLoading) {
+            vm.loadKugouPlaylists()
         }
     }
 
@@ -1059,9 +1065,14 @@ fun ExploreScreen(
                             }
                         }
                         SearchSource.KUGOU -> {
-                            Box(Modifier.fillMaxSize(), Alignment.Center) {
-                                Text(stringResource(R.string.explore_bili_desc), style = MaterialTheme.typography.bodyLarge)
-                            }
+                            KugouDefaultContent(
+                                ui = ui,
+                                vm = vm,
+                                onPlay = onKugouPlaylistClick,
+                                favoriteKeys = favoriteKeys,
+                                offlineMode = offlineMode,
+                                isTabletLayout = isTabletLayout
+                            )
                         }
                     }
                 }
@@ -2295,6 +2306,88 @@ internal fun SongRow(
 
 internal fun buildExploreSongInfo(song: SongItem): String {
     return "${song.displayName()}-${song.displayArtist()}"
+}
+
+@Composable
+private fun KugouDefaultContent(
+    ui: ExploreUiState,
+    vm: ExploreViewModel,
+    onPlay: (PlaylistSummary) -> Unit,
+    favoriteKeys: Set<String>,
+    offlineMode: Boolean = false,
+    isTabletLayout: Boolean = false
+) {
+    val miniPlayerHeight = LocalMiniPlayerHeight.current
+    val gridHorizontalPadding = if (isTabletLayout) 56.dp else 16.dp
+    val gridMinCellSize = if (isTabletLayout) 156.dp else 120.dp
+    val gridSpacing = if (isTabletLayout) 14.dp else 10.dp
+    when {
+        ui.kugouPlaylistsLoading -> {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(bottom = miniPlayerHeight),
+                Alignment.Center
+            ) { CircularProgressIndicator() }
+        }
+        ui.kugouPlaylistsError != null -> {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(bottom = miniPlayerHeight),
+                Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        ui.kugouPlaylistsError!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    HapticTextButton(onClick = { vm.loadKugouPlaylists() }) {
+                        Text(stringResource(R.string.action_retry))
+                    }
+                }
+            }
+        }
+        ui.kugouPlaylists.isEmpty() -> {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(bottom = miniPlayerHeight),
+                Alignment.Center
+            ) {
+                Text(
+                    stringResource(R.string.platform_kugou),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            }
+        }
+        else -> {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(gridMinCellSize),
+                contentPadding = PaddingValues(
+                    start = gridHorizontalPadding, end = gridHorizontalPadding,
+                    top = 8.dp,
+                    bottom = 16.dp + miniPlayerHeight
+                ),
+                verticalArrangement = Arrangement.spacedBy(gridSpacing),
+                horizontalArrangement = Arrangement.spacedBy(gridSpacing),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(
+                    items = ui.kugouPlaylists,
+                    key = { it.id }
+                ) { playlist ->
+                    KuGouPlaylistCard(
+                        playlist = playlist,
+                        isFavorite = favoriteKeys.contains("kugou:${playlist.id}"),
+                        onClick = { onPlay(playlist) }
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

@@ -19,6 +19,7 @@ private val SHAREABLE_CATALOG_HOSTS = setOf(
     "youtube.com",
     "m.youtube.com",
     "youtu.be",
+    "activity.kugou.com"
 )
 
 internal fun buildRemoteSongShareUrl(originalSong: SongItem, queue: List<SongItem>): String? {
@@ -26,6 +27,9 @@ internal fun buildRemoteSongShareUrl(originalSong: SongItem, queue: List<SongIte
         if (videoId.isNotBlank()) {
             return "https://music.youtube.com/watch?v=$videoId"
         }
+    }
+    if (isKugouSong(originalSong)) {
+        return "https://activity.kugou.com/share/v-98650b10/index.html?hash=${originalSong.audioId}&album_audio_id=${originalSong.albumId}"
     }
 
     if (isBilibiliSong(originalSong)) {
@@ -80,4 +84,9 @@ private fun isNeteaseSong(song: SongItem): Boolean {
 private fun isBilibiliSong(song: SongItem): Boolean {
     if (song.channelId.equals("bilibili", ignoreCase = true)) return true
     return song.album.startsWith(PlayerManager.BILI_SOURCE_TAG)
+}
+
+private fun isKugouSong(song: SongItem): Boolean {
+    if (song.channelId.equals("kugou", ignoreCase = true)) return true
+    return song.album.startsWith(PlayerManager.KuGou_SOURCE_TAG)
 }

@@ -111,7 +111,7 @@ class KugouClientWrapper(
         }
         lastSnapshot = persisted
         NPLogger.d(TAG, "Seeded ${persisted.size} cookies from repository.")
-        if (sdk.cookieJar.getDev() == "") {
+        if (sdk.cookieJar.getDev() != (Build.MANUFACTURER + Build.DEVICE)) {
             NPLogger.d(TAG, "DevName is unset, set deviceName...")
             try {
                 sdk.cookieJar.setDev(Build.MANUFACTURER + Build.DEVICE)
