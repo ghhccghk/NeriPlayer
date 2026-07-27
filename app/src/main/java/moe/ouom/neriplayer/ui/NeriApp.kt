@@ -221,6 +221,7 @@ import moe.ouom.neriplayer.ui.screen.debug.BiliApiProbeScreen
 import moe.ouom.neriplayer.ui.screen.debug.CrashLogListScreen
 import moe.ouom.neriplayer.ui.screen.debug.DebugCrashTestType
 import moe.ouom.neriplayer.ui.screen.debug.DebugHomeScreen
+import moe.ouom.neriplayer.ui.screen.debug.KugouApiProbeScreen
 import moe.ouom.neriplayer.ui.screen.debug.ListenTogetherDebugScreen
 import moe.ouom.neriplayer.ui.screen.debug.LogListScreen
 import moe.ouom.neriplayer.ui.screen.debug.NeteaseApiProbeScreen
@@ -309,6 +310,7 @@ private val DEBUG_NAVIGATION_DEPTH_BY_ROUTE = mapOf(
     Destinations.DebugYouTube.route to 1,
     Destinations.DebugBili.route to 1,
     Destinations.DebugNetease.route to 1,
+    Destinations.DebugKugou.route to 1,
     Destinations.DebugSearch.route to 1,
     Destinations.DebugLogsList.route to 1,
     Destinations.DebugCrashLogsList.route to 1,
@@ -3238,6 +3240,9 @@ private fun NeriAppContent(
                             onOpenNeteaseDebug = {
                                 navController.navigate(Destinations.DebugNetease.route)
                             },
+                            onOpenKugouDebug = {
+                                navController.navigate(Destinations.DebugKugou.route)
+                            },
                             onOpenSearchDebug = {
                                 navController.navigate(Destinations.DebugSearch.route)
                             },
@@ -4130,6 +4135,25 @@ private fun NeriAppContent(
                                 ) {
                                     RenderNavHostScene(Destinations.DebugNetease.route) {
                                         NeteaseApiProbeScreen()
+                                    }
+                                }
+                                composable(
+                                    route = Destinations.DebugKugou.route,
+                                    enterTransition = {
+                                        debugNavigationEnterTransition(coherentFeedbackEnabled)
+                                    },
+                                    exitTransition = {
+                                        debugNavigationExitTransition(coherentFeedbackEnabled)
+                                    },
+                                    popEnterTransition = {
+                                        debugNavigationEnterTransition(coherentFeedbackEnabled)
+                                    },
+                                    popExitTransition = {
+                                        debugNavigationExitTransition(coherentFeedbackEnabled)
+                                    }
+                                ) {
+                                    RenderNavHostScene(Destinations.DebugKugou.route) {
+                                        KugouApiProbeScreen()
                                     }
                                 }
                                 composable(

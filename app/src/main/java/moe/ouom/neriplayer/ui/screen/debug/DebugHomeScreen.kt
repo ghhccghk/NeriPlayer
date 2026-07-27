@@ -113,6 +113,7 @@ fun DebugHomeScreen(
     onOpenYouTubeDebug: () -> Unit,
     onOpenBiliDebug: () -> Unit,
     onOpenNeteaseDebug: () -> Unit,
+    onOpenKugouDebug: () -> Unit,
     onOpenSearchDebug: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenCrashLogs: () -> Unit,
@@ -275,6 +276,23 @@ fun DebugHomeScreen(
                     headlineContent = { Text(stringResource(R.string.debug_netease_api)) },
                     supportingContent = { Text(stringResource(R.string.debug_netease_api_desc)) },
                     modifier = Modifier.clickable(onClick = onOpenNeteaseDebug),
+                    colors = ListItemDefaults.colors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    )
+                )
+
+                ListItem(
+                    leadingContent = {
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_kugou),
+                            contentDescription = stringResource(R.string.platform_kugou),
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    },
+                    headlineContent = { Text(stringResource(R.string.debug_kugou_api)) },
+                    supportingContent = { Text(stringResource(R.string.debug_kugou_api_desc)) },
+                    modifier = Modifier.clickable(onClick = onOpenKugouDebug),
                     colors = ListItemDefaults.colors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                     )

@@ -1687,7 +1687,7 @@ object PlayerManager {
                 PlaybackAudioSource.NETEASE -> settingsRepo.setAudioQuality(normalizedKey)
                 PlaybackAudioSource.BILIBILI -> settingsRepo.setBiliAudioQuality(normalizedKey)
                 PlaybackAudioSource.YOUTUBE_MUSIC -> settingsRepo.setYouTubeAudioQuality(normalizedKey)
-                PlaybackAudioSource.KUGOU -> Unit
+                PlaybackAudioSource.KUGOU -> settingsRepo.setKuGouAudioQuality(normalizedKey)
                 PlaybackAudioSource.LOCAL -> Unit
             }
         }
@@ -1898,7 +1898,7 @@ object PlayerManager {
             PlaybackAudioSource.NETEASE -> ::neteaseQualityRefreshJob
             PlaybackAudioSource.YOUTUBE_MUSIC -> ::youtubeQualityRefreshJob
             PlaybackAudioSource.BILIBILI -> ::biliQualityRefreshJob
-            PlaybackAudioSource.KUGOU -> return
+            PlaybackAudioSource.KUGOU -> ::kugouQualityRefreshJob
             PlaybackAudioSource.LOCAL -> return
         }
         targetJob.get()?.cancel()

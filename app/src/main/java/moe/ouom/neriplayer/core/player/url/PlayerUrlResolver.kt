@@ -200,6 +200,65 @@ internal fun buildNeteaseOfflineCacheAudioInfo(
     )
 }
 
+internal fun qualityLabelForKugou(key: String, getLocalizedString: (Int) -> String): String = when (key) {
+    "128" -> getLocalizedString(R.string.settings_audio_quality_low)
+    "320" -> getLocalizedString(R.string.settings_audio_quality_medium)
+    "flac" -> getLocalizedString(R.string.settings_audio_quality_exhigh)
+    "high" -> getLocalizedString(R.string.settings_audio_quality_high)
+    "viper_atmos" -> getLocalizedString(R.string.settings_audio_quality_viper_atmos)
+    "viper_clear" -> getLocalizedString(R.string.settings_audio_quality_viper_clear)
+    "viper_tape" -> getLocalizedString(R.string.settings_audio_quality_viper_tape)
+    "super" -> getLocalizedString(R.string.settings_audio_quality_super)
+    else -> key
+}
+
+internal fun buildKugouQualityOptions(getLocalizedString: (Int) -> String): List<PlaybackQualityOption> = listOf(
+    PlaybackQualityOption("128", qualityLabelForKugou("128", getLocalizedString)),
+    PlaybackQualityOption("320", qualityLabelForKugou("320", getLocalizedString)),
+    PlaybackQualityOption("flac", qualityLabelForKugou("flac", getLocalizedString)),
+    PlaybackQualityOption("high", qualityLabelForKugou("high", getLocalizedString)),
+    PlaybackQualityOption("viper_atmos", qualityLabelForKugou("viper_atmos", getLocalizedString)),
+    PlaybackQualityOption("viper_clear", qualityLabelForKugou("viper_clear", getLocalizedString)),
+    PlaybackQualityOption("viper_tape", qualityLabelForKugou("viper_tape", getLocalizedString)),
+    PlaybackQualityOption("super", qualityLabelForKugou("super", getLocalizedString))
+)
+
+internal fun buildKugouPlaybackAudioInfo(
+    resolvedQuality: String,
+    mimeType: String?,
+    getLocalizedString: (Int) -> String
+): PlaybackAudioInfo {
+    return PlaybackAudioInfo(
+        source = PlaybackAudioSource.KUGOU,
+        qualityKey = resolvedQuality,
+        qualityLabel = qualityLabelForKugou(resolvedQuality, getLocalizedString),
+        qualityOptions = buildKugouQualityOptions(getLocalizedString),
+        codecLabel = deriveCodecLabel(mimeType),
+        mimeType = mimeType
+    )
+}
+
+internal val KUGOU_QUALITY_FALLBACK_ORDER = listOf(
+    "super",
+    "viper_tape",
+    "viper_clear",
+    "viper_atmos",
+    "high",
+    "flac",
+    "320",
+    "128"
+)
+
+internal fun buildKugouQualityCandidates(preferredQuality: String): List<String> {
+    val normalized = preferredQuality.trim().lowercase().ifBlank { "128" }
+    val preferredIndex = KUGOU_QUALITY_FALLBACK_ORDER.indexOf(normalized)
+    return if (preferredIndex >= 0) {
+        KUGOU_QUALITY_FALLBACK_ORDER.drop(preferredIndex)
+    } else {
+        listOf(normalized, "128").distinct()
+    }
+}
+
 internal fun buildNeteaseQualityCandidates(preferredQuality: String): List<String> {
     val normalizedQuality = preferredQuality.trim().lowercase().ifBlank { "exhigh" }
     val preferredIndex = NETEASE_QUALITY_FALLBACK_ORDER.indexOf(normalizedQuality)

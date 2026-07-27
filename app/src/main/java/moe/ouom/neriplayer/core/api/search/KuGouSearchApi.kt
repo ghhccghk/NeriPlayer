@@ -87,7 +87,6 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                 val data = infoResponse.body["data"]?.jsonArray?.get(0)?.jsonObject
                     ?: throw IOException("Empty response for $id")
 
-                Log.d("Kugou", "getSongInfo $data")
 
                 val songName = data["name"]?.jsonPrimitive?.content ?: "Unknown"
                 val singer = data["singername"]?.jsonPrimitive?.content ?: "Unknown"
@@ -97,8 +96,6 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                 val coverUrl = info?.get("image")?.jsonPrimitive?.content?.replace("/{size}/", "/")
 
                 val lyric = lyricDeferred.await()
-
-                Log.d("Kugou", "Lyric ${lyric.toString()}")
 
                 SongDetails(
                     id = id,
@@ -115,7 +112,6 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
 
     suspend fun searchAndFetchLyric(hash: String): String? {
         val searchResponse = client.searchLyric(hash = hash)
-        Log.d("Kugou", "searchResponseLyric ${searchResponse.body}")
         if (searchResponse.status != 200) return null
 
         val candidates = searchResponse.body["candidates"]?.jsonArray
