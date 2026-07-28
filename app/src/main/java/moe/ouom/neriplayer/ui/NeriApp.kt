@@ -4218,7 +4218,7 @@ private fun NeriAppContent(
                                     }
                                 ) {
                                     RenderNavHostScene(Destinations.DebugCrashLogsList.route) {
-                                        CrashLogListScreen(
+                                       CrashLogListScreen(
                                             onBack = { navController.popBackStack() },
                                             onLogFileClick = { filePath ->
                                                 navController.navigate(

@@ -43,13 +43,22 @@ private const val KUGOU_AUTH_PREFS = "kugou_auth_secure_prefs"
 private const val KEY_KUGOU_AUTH_BUNDLE = "kugou_auth_bundle"
 
 private val KUGOU_LOGIN_ESSENTIAL_KEYS = listOf("token", "userid")
+private val KUGOU_LOGIN_COOKIE_KEYS = setOf("token", "userid", "vip_token", "vip_type")
+
+internal fun withoutKugouLoginCookies(cookies: Map<String, String>): Map<String, String> {
+    return cookies.filterTo(linkedMapOf()) { (key, value) ->
+        key.isNotBlank() && value.isNotBlank() && key !in KUGOU_LOGIN_COOKIE_KEYS
+    }
+}
 
 data class KugouAuthBundle(
     val cookies: Map<String, String> = emptyMap(),
     val savedAt: Long = 0L
 ) {
     fun hasLoginCookies(): Boolean {
-        return KUGOU_LOGIN_ESSENTIAL_KEYS.all { key -> !cookies[key].isNullOrBlank() }
+        val token = cookies["token"]
+        val userId = cookies["userid"]?.toLongOrNull()
+        return !token.isNullOrBlank() && userId != null && userId > 0L
     }
 
     fun toJson(): String {

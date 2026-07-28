@@ -4,6 +4,7 @@ import moe.ouom.neriplayer.core.api.youtube.YouTubePlayableStreamType
 import moe.ouom.neriplayer.core.download.ManagedDownloadStorage
 import moe.ouom.neriplayer.core.player.resolver.youtube.ChunkRequestIOException
 import moe.ouom.neriplayer.data.model.SongItem
+import moe.ouom.neriplayer.util.network.TaggedTestCall
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -476,7 +477,7 @@ class AudioDownloadManagerTest {
         assertEquals(0L, AudioDownloadManager.advanceRetryWakeSignalVersion(Long.MAX_VALUE))
     }
 
-    private class FakeCall(url: String) : Call {
+    private class FakeCall(url: String) : TaggedTestCall() {
         private val request = Request.Builder().url(url).build()
         private val canceled = AtomicBoolean(false)
 

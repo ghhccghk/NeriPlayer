@@ -24,7 +24,6 @@ package moe.ouom.neriplayer.core.api.search
  */
 
 import android.annotation.SuppressLint
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -50,7 +49,6 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
             }
 
             val data = response.body["data"]?.jsonObject ?: return@withContext emptyList()
-            Log.d("Kugou", data.toString())
             val info = data["lists"]?.jsonArray ?: return@withContext emptyList()
 
             info.mapNotNull { item ->

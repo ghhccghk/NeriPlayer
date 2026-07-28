@@ -25,7 +25,6 @@ package moe.ouom.neriplayer.core.api.kugou
 
 import android.app.ActivityManager
 import android.content.Context
-import android.hardware.SensorManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
@@ -34,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.data.auth.kugou.KugouCookieRepository
+import moe.ouom.neriplayer.data.auth.kugou.withoutKugouLoginCookies
 import top.ghhccghk.multiplatform.kugouapi.KuGouClient
 import top.ghhccghk.multiplatform.kugouapi.KuGouConfig
 import top.ghhccghk.multiplatform.kugouapi.core.KuGouResponse
@@ -67,6 +67,8 @@ class KugouClientWrapper(
     /** Snapshot of the last cookie state we persisted; used to detect changes. */
     @Volatile
     private var lastSnapshot: Map<String, String> = emptyMap()
+
+    private val cookieLock = Any()
 
     init {
         // Seed the SDK's internal CookieJar from persisted state.
@@ -106,16 +108,19 @@ class KugouClientWrapper(
      */
     fun seedFromRepository() {
         val persisted = cookieRepo.loadCookies()
-        persisted.forEach { (k, v) ->
-            sdk.cookieJar[k] = v
+        synchronized(cookieLock) {
+            clearSdkLoginCookies()
+            persisted.forEach { (k, v) ->
+                sdk.cookieJar[k] = v
+            }
+            lastSnapshot = sdk.cookieJar.getAll()
         }
-        lastSnapshot = persisted
         NPLogger.d(TAG, "Seeded ${persisted.size} cookies from repository.")
         if (sdk.cookieJar.getDev() != (Build.MANUFACTURER + Build.DEVICE)) {
             NPLogger.d(TAG, "DevName is unset, set deviceName...")
             try {
                 sdk.cookieJar.setDev(Build.MANUFACTURER + Build.DEVICE)
-                NPLogger.d(TAG, "DevName set OK, dev=${sdk.cookieJar.getDev()}")
+                NPLogger.d(TAG, "Device name configured.")
             } catch (e: Exception) {
                 NPLogger.w(TAG, "Failed to set deviceName: ${e.message}")
             }
@@ -138,7 +143,7 @@ class KugouClientWrapper(
                     )
                 }
                 syncCookiesToRepository()
-                NPLogger.d(TAG, "Device registered, dfid=${sdk.cookieJar.getDfid()}")
+                NPLogger.d(TAG, "Device registered.")
             } catch (e: Exception) {
                 NPLogger.w(TAG, "Failed to register device: ${e.message}")
             }
@@ -153,11 +158,70 @@ class KugouClientWrapper(
      * Business code never needs to call this directly.
      */
     fun syncCookiesToRepository() {
-        val current = sdk.cookieJar.getAll()
-        if (current != lastSnapshot) {
-            cookieRepo.updateCookies(current)
-            lastSnapshot = current
+        synchronized(cookieLock) {
+            val current = sdk.cookieJar.getAll()
+            if (current != lastSnapshot) {
+                cookieRepo.updateCookies(current)
+                lastSnapshot = current
+            }
         }
+    }
+
+    /**
+     * Applies a successful login to the SDK CookieJar and persists its complete snapshot.
+     */
+    fun persistLogin(token: String, userId: String): Boolean {
+        val parsedUserId = userId.toLongOrNull()?.takeIf { it > 0L } ?: return false
+        if (token.isBlank()) return false
+
+        return persistImportedCookies(
+            mapOf(
+                "token" to token,
+                "userid" to parsedUserId.toString()
+            )
+        )
+    }
+
+    /**
+     * Replaces login cookies while preserving the SDK's current device identity,
+     * then persists the complete CookieJar snapshot.
+     */
+    fun persistImportedCookies(cookies: Map<String, String>): Boolean {
+        val sanitizedCookies = cookies.filter { (key, value) ->
+            key.isNotBlank() && value.isNotBlank()
+        }
+        if (sanitizedCookies.isEmpty()) return false
+
+        val snapshot = synchronized(cookieLock) {
+            clearSdkLoginCookies()
+            sanitizedCookies.forEach { (key, value) ->
+                sdk.cookieJar[key] = value
+            }
+            sdk.cookieJar.getAll()
+                .filterValues { it.isNotBlank() }
+                .also { lastSnapshot = it }
+        }
+        cookieRepo.saveCookies(snapshot)
+        return true
+    }
+
+    /**
+     * Clears login credentials from both the live SDK session and encrypted storage.
+     * Device identity cookies are retained so logout does not force device registration.
+     */
+    fun clearAuthentication() {
+        val retainedCookies = synchronized(cookieLock) {
+            clearSdkLoginCookies()
+            sdk.cookieJar.getAll().also { lastSnapshot = it }
+        }.let(::withoutKugouLoginCookies)
+        cookieRepo.saveCookies(retainedCookies, savedAt = 0L)
+    }
+
+    private fun clearSdkLoginCookies() {
+        sdk.cookieJar.setToken("")
+        sdk.cookieJar.setUserid(0L)
+        sdk.cookieJar.setVipToken("")
+        sdk.cookieJar["vip_type"] = ""
     }
 
     /**
@@ -286,7 +350,7 @@ class KugouClientWrapper(
     fun getCookies(): Map<String, String> = sdk.cookieJar.getAll()
 
     fun dumpCookies() {
-        sdk.cookieJar.dump()
+        NPLogger.d(TAG, "Cookie keys: ${sdk.cookieJar.getAll().keys.sorted()}.")
     }
     // ── Device info gathering ──────────────────────────────────────
 

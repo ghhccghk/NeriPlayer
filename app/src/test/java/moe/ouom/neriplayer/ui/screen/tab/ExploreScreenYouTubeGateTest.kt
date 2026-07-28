@@ -22,6 +22,7 @@ class ExploreScreenYouTubeGateTest {
             listOf(
                 SearchSource.NETEASE,
                 SearchSource.BILIBILI,
+                SearchSource.KUGOU,
                 SearchSource.LINK_RECOGNITION
             ),
             sources

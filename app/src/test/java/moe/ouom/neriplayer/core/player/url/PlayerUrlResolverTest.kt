@@ -45,4 +45,35 @@ class PlayerUrlResolverTest {
         assertEquals("exhigh", audioInfo.qualityKey)
         assertEquals(R.string.quality_very_high.toString(), audioInfo.qualityLabel)
     }
+
+    @Test
+    fun buildKugouPlaybackAudioInfo_exposesKugouQualityOptions() {
+        val audioInfo = buildKugouPlaybackAudioInfo(
+            resolvedQuality = "flac",
+            mimeType = "audio/flac",
+            getLocalizedString = { it.toString() }
+        )
+
+        assertEquals(PlaybackAudioSource.KUGOU, audioInfo.source)
+        assertEquals("flac", audioInfo.qualityKey)
+        assertEquals(R.string.settings_audio_quality_exhigh.toString(), audioInfo.qualityLabel)
+        assertEquals(8, audioInfo.qualityOptions.size)
+        assertEquals("FLAC", audioInfo.codecLabel)
+    }
+
+    @Test
+    fun buildKugouQualityCandidates_fallsBackFromPreferredQuality() {
+        assertEquals(
+            listOf("high", "flac", "320", "128"),
+            buildKugouQualityCandidates("HIGH")
+        )
+    }
+
+    @Test
+    fun buildKugouQualityCandidates_preservesUnknownQualityBeforeFallback() {
+        assertEquals(
+            listOf("experimental", "128"),
+            buildKugouQualityCandidates(" experimental ")
+        )
+    }
 }

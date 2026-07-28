@@ -13,6 +13,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.testutil.assumeComposeHostAvailable
 import moe.ouom.neriplayer.ui.viewmodel.auth.BiliAuthViewModel
+import moe.ouom.neriplayer.ui.viewmodel.auth.KugouAuthViewModel
 import moe.ouom.neriplayer.ui.viewmodel.auth.YouTubeAuthViewModel
 import moe.ouom.neriplayer.ui.viewmodel.debug.NeteaseAuthViewModel
 import org.junit.Assert.assertEquals
@@ -258,6 +259,105 @@ class AuthDialogsTest {
         composeRule.onNodeWithText(context.getString(R.string.login_paste_cookie)).performClick()
         waitForText(context.getString(R.string.login_paste_youtube_cookie_hint))
         waitForText(context.getString(R.string.login_save_cookie))
+    }
+
+    @Test
+    fun kugouSheet_switchesToCookieImportTabAndShowsInput() {
+        val context = targetContext
+        val vm = KugouAuthViewModel(application)
+
+        composeRule.setContent {
+            MaterialTheme {
+                Box {
+                    SettingsKugouAuthDialogs(
+                        showSheet = true,
+                        initialTab = 0,
+                        onDismissSheet = { },
+                        inlineMsg = context.getString(R.string.auth_cookie_saved),
+                        onInlineMsgChange = { },
+                        vm = vm,
+                        onBrowserLogin = { }
+                    )
+                }
+            }
+        }
+
+        waitForText(context.getString(R.string.login_paste_cookie))
+        composeRule.onNodeWithText(context.getString(R.string.login_paste_cookie)).performClick()
+        waitForText(context.getString(R.string.login_save_cookie))
+    }
+
+    @Test
+    fun kugouSavedCookieDialog_continueActionOpensLoginTab() {
+        val context = targetContext
+        val vm = KugouAuthViewModel(application)
+        val openedTabs = mutableListOf<Int>()
+        var dismissedCount = 0
+
+        composeRule.setContent {
+            MaterialTheme {
+                Box {
+                    SettingsKugouAuthDialogs(
+                        showSheet = false,
+                        initialTab = 0,
+                        onDismissSheet = { },
+                        inlineMsg = null,
+                        onInlineMsgChange = { },
+                        vm = vm,
+                        showSavedCookieDialog = true,
+                        onDismissSavedCookieDialog = { dismissedCount++ },
+                        onOpenSheetAtTab = { openedTabs += it },
+                        onLogout = { }
+                    )
+                }
+            }
+        }
+
+        waitForText(context.getString(R.string.settings_saved_cookie_continue))
+        composeRule.onNodeWithText(
+            context.getString(R.string.settings_saved_cookie_continue)
+        ).performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(listOf(0), openedTabs)
+            assertEquals(1, dismissedCount)
+        }
+    }
+
+    @Test
+    fun kugouSavedCookieDialog_logoutActionInvokesCallback() {
+        val context = targetContext
+        val vm = KugouAuthViewModel(application)
+        var dismissedCount = 0
+        var logoutCount = 0
+
+        composeRule.setContent {
+            MaterialTheme {
+                Box {
+                    SettingsKugouAuthDialogs(
+                        showSheet = false,
+                        initialTab = 0,
+                        onDismissSheet = { },
+                        inlineMsg = null,
+                        onInlineMsgChange = { },
+                        vm = vm,
+                        showSavedCookieDialog = true,
+                        onDismissSavedCookieDialog = { dismissedCount++ },
+                        onLogout = { logoutCount++ }
+                    )
+                }
+            }
+        }
+
+        waitForText(context.getString(R.string.settings_saved_cookie_logout))
+        composeRule.onNodeWithText(
+            context.getString(R.string.settings_saved_cookie_logout)
+        ).performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(1, logoutCount)
+            assertEquals(1, dismissedCount)
+        }
     }
 
     @Test

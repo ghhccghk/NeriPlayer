@@ -9,10 +9,12 @@ import kotlinx.coroutines.test.setMain
 import moe.ouom.neriplayer.listentogether.network.http.ListenTogetherApi
 import moe.ouom.neriplayer.listentogether.network.ws.ListenTogetherWebSocketClient
 import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherEvent
+import moe.ouom.neriplayer.testutil.MainDispatcherRule
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Rule
 import org.junit.Before
 import org.junit.Test
 

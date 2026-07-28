@@ -776,6 +776,7 @@ class NowPlayingScreenTest {
             isYouTubeMusicSong = false,
             isFromNeteaseTag = true,
             isFromBiliTag = false,
+            isFromKugouTag = false,
             currentMediaUrl = "https://m701.music.126.net/demo.mp3",
             playbackAudioSource = PlaybackAudioSource.BILIBILI
         )
@@ -790,6 +791,7 @@ class NowPlayingScreenTest {
             isYouTubeMusicSong = false,
             isFromNeteaseTag = true,
             isFromBiliTag = false,
+            isFromKugouTag = false,
             currentMediaUrl = "content://downloads/demo.flac",
             playbackAudioSource = PlaybackAudioSource.LOCAL
         )
@@ -810,6 +812,21 @@ class NowPlayingScreenTest {
         )
 
         assertEquals(PlaybackSourceType.LOCAL, sourceType)
+    }
+
+    @Test
+    fun `playback source badge uses resolved kugou audio source`() {
+        val sourceType = resolveNowPlayingPlaybackSourceType(
+            isLocalSong = false,
+            isYouTubeMusicSong = false,
+            isFromNeteaseTag = false,
+            isFromBiliTag = false,
+            isFromKugouTag = false,
+            currentMediaUrl = "https://example.test/audio.flac",
+            playbackAudioSource = PlaybackAudioSource.KUGOU
+        )
+
+        assertEquals(PlaybackSourceType.KUGOU, sourceType)
     }
 
     private fun testSong(

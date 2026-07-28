@@ -160,9 +160,11 @@ class KugouLoginActivity : ComponentActivity() {
     }
 
     private fun handleLoginSuccess(token: String, userid: String) {
-        NPLogger.d(TAG, "Login success: token=$token, userid=$userid")
-        val cookies = mapOf("token" to token, "userid" to userid)
-        AppContainer.kugouCookieRepo.saveCookies(cookies)
+        if (!kugouClient.persistLogin(token, userid)) {
+            NPLogger.w(TAG, "Ignored invalid Kugou login credentials.")
+            return
+        }
+        NPLogger.d(TAG, "Login credentials persisted.")
         setResult(Activity.RESULT_OK)
         finish()
     }
@@ -958,13 +960,12 @@ class KugouLoginActivity : ComponentActivity() {
         try {
             // 从已保存的 Cookie 中读取 token 和 userid
             kugouClient.seedFromRepository()
-            kugouClient.dumpCookies()
 
             val response = withContext(Dispatchers.IO) {
                 kugouClient.auth.loginByToken()
             }
             if (response.status != 200) {
-                onError("请求失败: HTTP ${response.status},${response.body}")
+                onError("请求失败: HTTP ${response.status}")
                 return
             }
             val errCode = response.body["err_code"]?.jsonPrimitive?.intOrNull
@@ -979,12 +980,10 @@ class KugouLoginActivity : ComponentActivity() {
             val data = response.body["data"]?.jsonObject
             val newToken = data?.get("token")?.jsonPrimitive?.content ?: ""
             val newUserid = data?.get("userid")?.jsonPrimitive?.content ?: "0"
-            NPLogger.d(TAG, "Data=$data Token=$newToken, newUserid=$newUserid")
             if (newToken.isBlank() || newUserid.isBlank() || newUserid == "0") {
                 onError("刷新响应缺少 token 或 userid")
                 return
             }
-            NPLogger.d("${ kugouClient.youth.getUnionVip() }")
             onSuccess()
             handleLoginSuccess(newToken, newUserid)
         } catch (e: Exception) {

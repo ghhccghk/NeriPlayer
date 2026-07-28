@@ -33,7 +33,7 @@ import kotlinx.coroutines.launch
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.data.auth.common.SavedCookieAuthHealth
 import moe.ouom.neriplayer.data.auth.common.SavedCookieAuthState
-import org.json.JSONObject
+import moe.ouom.neriplayer.data.auth.common.parseRawCookieText
 
 data class KugouAuthUiState(
     val health: SavedCookieAuthHealth = SavedCookieAuthHealth(SavedCookieAuthState.Missing),
@@ -62,16 +62,16 @@ class KugouAuthViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearAuth() {
-        repo.clear()
+        AppContainer.kugouClient.clearAuthentication()
     }
 
     /**
      * Import cookies from a raw cookie string (key=value pairs separated by newlines or semicolons).
      */
     fun importCookiesFromRaw(raw: String) {
-        val cookies = parseRawCookieString(raw)
+        val cookies = parseRawCookieText(raw)
         if (cookies.isNotEmpty()) {
-            repo.saveCookies(cookies)
+            AppContainer.kugouClient.persistImportedCookies(cookies)
         }
     }
 
@@ -80,25 +80,8 @@ class KugouAuthViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun importCookiesFromMap(cookies: Map<String, String>) {
         if (cookies.isNotEmpty()) {
-            repo.saveCookies(cookies)
+            AppContainer.kugouClient.persistImportedCookies(cookies)
         }
     }
 
-    private fun parseRawCookieString(raw: String): Map<String, String> {
-        val result = linkedMapOf<String, String>()
-        // Support both newline-separated and semicolon-separated cookies
-        val lines = raw.split(Regex("[\n;]"))
-        for (line in lines) {
-            val trimmed = line.trim()
-            if (trimmed.isBlank()) continue
-            val eqIndex = trimmed.indexOf('=')
-            if (eqIndex <= 0) continue
-            val key = trimmed.substring(0, eqIndex).trim()
-            val value = trimmed.substring(eqIndex + 1).trim()
-            if (key.isNotBlank() && value.isNotBlank()) {
-                result[key] = value
-            }
-        }
-        return result
-    }
 }

@@ -32,7 +32,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Looper
-import android.util.Log
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -2881,7 +2880,6 @@ object AudioDownloadManager {
         return withContext(Dispatchers.IO) {
             val hash = song.audioId ?: return@withContext null
             val response = AppContainer.kugouClient.getSongUrl(hash = hash, quality = "128")
-            Log.d("Kugou","resolveKugou $response")
             if (response.status != 200) return@withContext null
 
             val data = response.body

@@ -31,7 +31,7 @@ class OkHttpCallAwaitTest {
         assertTrue(call.isCanceled())
     }
 
-    private class PendingCall : Call {
+    private class PendingCall : TaggedTestCall() {
         private val request = Request.Builder().url("https://example.com").build()
         private val canceled = AtomicBoolean(false)
         private val executed = AtomicBoolean(false)

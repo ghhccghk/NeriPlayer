@@ -16,4 +16,15 @@ class PlayerManagerTrafficQualityExtensionsTest {
             PlayerManager.youtubePreferredQuality = previousQuality
         }
     }
+
+    @Test
+    fun `effectiveKuGouQuality falls back before player manager initialization`() {
+        val previousQuality = PlayerManager.kuGouPreferredQuality
+        PlayerManager.kuGouPreferredQuality = "flac"
+        try {
+            assertEquals("flac", PlayerManager.effectiveKuGouQuality())
+        } finally {
+            PlayerManager.kuGouPreferredQuality = previousQuality
+        }
+    }
 }
