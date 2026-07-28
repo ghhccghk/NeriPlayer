@@ -1898,7 +1898,7 @@ object PlayerManager {
             PlaybackAudioSource.NETEASE -> ::neteaseQualityRefreshJob
             PlaybackAudioSource.YOUTUBE_MUSIC -> ::youtubeQualityRefreshJob
             PlaybackAudioSource.BILIBILI -> ::biliQualityRefreshJob
-            PlaybackAudioSource.KUGOU -> ::kugouQualityRefreshJob
+            PlaybackAudioSource.KUGOU -> return
             PlaybackAudioSource.LOCAL -> return
         }
         targetJob.get()?.cancel()
