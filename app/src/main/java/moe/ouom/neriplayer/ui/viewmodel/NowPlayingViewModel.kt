@@ -40,6 +40,7 @@ import moe.ouom.neriplayer.core.api.search.SongSearchInfo
 import moe.ouom.neriplayer.core.api.youtube.YouTubeMusicCreatorSummary
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.data.model.SongItem
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
 import moe.ouom.neriplayer.core.api.search.SearchManager
 import moe.ouom.neriplayer.core.download.GlobalDownloadManager
 import moe.ouom.neriplayer.core.di.AppContainer
@@ -527,7 +528,7 @@ class NowPlayingViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val isBili = originalSong.album.startsWith(PlayerManager.BILI_SOURCE_TAG)
-                val isKuGou = originalSong.album.startsWith(PlayerManager.KuGou_SOURCE_TAG)
+                val isKuGou = isKugouSong(originalSong)
 
                 if (!originalSong.mediaUri.isNullOrBlank()) {
                     val info = buildLocalOriginalSongInfo(originalSong)

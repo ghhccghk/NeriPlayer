@@ -104,6 +104,7 @@ import moe.ouom.neriplayer.core.player.policy.progress.resolveLongFormPlaybackRe
 import moe.ouom.neriplayer.core.player.metadata.ExternalBluetoothLyricPayload
 import moe.ouom.neriplayer.core.player.metadata.NeteaseLyricsCacheEntry
 import moe.ouom.neriplayer.core.player.metadata.YouTubeMusicLyricsCacheEntry
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
 import moe.ouom.neriplayer.core.player.model.normalizePlaybackLoudnessGainMb
 import moe.ouom.neriplayer.core.player.model.normalizePlaybackPitch
 import moe.ouom.neriplayer.core.player.model.normalizePlaybackSpeed
@@ -1425,11 +1426,7 @@ object PlayerManager {
             song.album.startsWith(BILI_SOURCE_TAG)
     }
 
-    internal fun isKugouTrack(song: SongItem): Boolean {
-        return song.channelId == "kugou" ||
-            song.album.startsWith(KuGou_SOURCE_TAG) ||
-            song.matchedLyricSource == MusicPlatform.KUGOU
-    }
+    internal fun isKugouTrack(song: SongItem): Boolean = isKugouSong(song)
     internal fun shouldPersistEmbeddedLyrics(song: SongItem): Boolean {
         return song.matchedLyric != null ||
             song.matchedTranslatedLyric != null ||

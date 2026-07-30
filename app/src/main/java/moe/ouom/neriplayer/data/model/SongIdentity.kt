@@ -28,6 +28,8 @@ import android.content.Context
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 import moe.ouom.neriplayer.data.local.media.LocalSongSupport
+import moe.ouom.neriplayer.data.platform.kugou.KUGOU_ALBUM_PREFIX
+import moe.ouom.neriplayer.data.platform.kugou.KUGOU_CHANNEL_ID
 import moe.ouom.neriplayer.data.platform.youtube.buildYouTubeMusicMediaUri
 import moe.ouom.neriplayer.data.platform.youtube.extractYouTubeMusicVideoId
 import moe.ouom.neriplayer.data.platform.youtube.stableYouTubeMusicId
@@ -315,6 +317,7 @@ private fun normalizedChannelId(
         extractYouTubeMusicVideoId(mediaUri) != null -> YOUTUBE_MUSIC_IDENTITY_ALBUM
         album.startsWith(BILIBILI_IDENTITY_HINT, ignoreCase = true) -> "bilibili"
         album.startsWith("Netease", ignoreCase = true) -> "netease"
+        album.startsWith(KUGOU_ALBUM_PREFIX, ignoreCase = true) -> KUGOU_CHANNEL_ID
         inferNeteaseForBlankRemote && mediaUri.isNullOrBlank() -> "netease"
         else -> null
     }

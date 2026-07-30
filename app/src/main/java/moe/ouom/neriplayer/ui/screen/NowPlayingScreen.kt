@@ -243,6 +243,7 @@ import moe.ouom.neriplayer.data.model.displayName
 import moe.ouom.neriplayer.data.model.sameIdentityAs
 import moe.ouom.neriplayer.data.model.stableKey
 import moe.ouom.neriplayer.data.model.BiliUploaderSummary
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
 import moe.ouom.neriplayer.data.platform.youtube.extractYouTubeMusicVideoId
 import moe.ouom.neriplayer.data.platform.youtube.isYouTubeMusicSong
 import moe.ouom.neriplayer.data.settings.DEFAULT_CLOUD_MUSIC_LYRIC_OFFSET_MS
@@ -1754,7 +1755,7 @@ fun NowPlayingScreen(
     val isFromBiliTag =
         currentSong?.album?.startsWith(PlayerManager.BILI_SOURCE_TAG) == true
     val isFromKugouTag =
-        currentSong?.album?.startsWith(PlayerManager.KuGou_SOURCE_TAG) == true
+        currentSong?.let { isKugouSong(it) } == true
     val rawPlaybackSourceType = resolveNowPlayingPlaybackSourceType(
         isLocalSong = currentSong?.isLocalSong() == true,
         isYouTubeMusicSong = currentSong?.let { isYouTubeMusicSong(it) } == true,

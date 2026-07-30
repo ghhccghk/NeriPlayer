@@ -32,6 +32,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Looper
+import android.util.Log
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -62,6 +63,8 @@ import moe.ouom.neriplayer.core.download.storage.ManagedDownloadAtomicFile
 import moe.ouom.neriplayer.core.download.policy.shouldUseIndexedSidecarLookup
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.core.player.resolver.youtube.ChunkRequestIOException
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
+import moe.ouom.neriplayer.data.platform.kugou.requireKugouHash
 import moe.ouom.neriplayer.core.player.resolver.netease.NeteasePlaybackResponseParser
 import moe.ouom.neriplayer.core.player.resolver.youtube.YouTubeGoogleVideoRangeSupport
 import moe.ouom.neriplayer.data.platform.bili.BiliAudioStreamInfo
@@ -1217,7 +1220,7 @@ object AudioDownloadManager {
                                     avoidDirect = avoidYouTubeDirectSource
                                 )
                                 isBili -> resolveBili(song)
-                                song.channelId == "kugou" -> resolveKugou(song)
+                                isKugouSong(song) -> resolveKugou(song)
                                 else -> resolveNetease(song.id)
                             }
                             if (resolved == null) {
@@ -2554,7 +2557,7 @@ object AudioDownloadManager {
             }
             val isYouTubeMusic = isYouTubeMusicSong(song)
             val isBili = song.album.startsWith(PlayerManager.BILI_SOURCE_TAG)
-            val isKugou = song.album.startsWith(PlayerManager.KuGou_SOURCE_TAG) || song.channelId == "kugou"
+            val isKugou = isKugouSong(song)
 
             when {
                 isYouTubeMusic -> {
@@ -2878,7 +2881,7 @@ object AudioDownloadManager {
 
     private suspend fun resolveKugou(song: SongItem): ResolvedDownloadSource? {
         return withContext(Dispatchers.IO) {
-            val hash = song.audioId ?: return@withContext null
+            val hash = requireKugouHash(song) ?: return@withContext null
             val response = AppContainer.kugouClient.getSongUrl(hash = hash, quality = "128")
             if (response.status != 200) return@withContext null
 
@@ -2897,9 +2900,11 @@ object AudioDownloadManager {
 
     private suspend fun downloadKugouLyrics(song: SongItem): String? {
         return withContext(Dispatchers.IO) {
-            val hash = song.audioId ?: return@withContext null
+            val hash = requireKugouHash(song) ?: return@withContext null
             runCatching {
-                AppContainer.kugouSearchApi.getSongInfo(hash).lyric
+                val lyric = AppContainer.kugouSearchApi.getSongInfo(hash).lyric
+                Log.d("KugouLyric", "歌词:${lyric}, hash:${hash}")
+                lyric
             }.getOrNull()
         }
     }

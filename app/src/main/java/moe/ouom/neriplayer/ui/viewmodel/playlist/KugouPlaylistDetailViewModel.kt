@@ -18,6 +18,7 @@ import kotlinx.serialization.json.longOrNull
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.data.model.SongItem
+import moe.ouom.neriplayer.data.platform.kugou.KUGOU_ALBUM_PREFIX
 import moe.ouom.neriplayer.ui.viewmodel.tab.PlaylistSummary
 
 private const val TAG = "NERI-KugouPlaylistVM"
@@ -139,7 +140,7 @@ class KugouPlaylistDetailViewModel(application: Application) : AndroidViewModel(
                     id = albumAudioId,
                     name = songName,
                     artist = artist,
-                    album = album,
+                    album = "${KUGOU_ALBUM_PREFIX}$album",
                     albumId = albumAudioId,
                     durationMs = duration,
                     coverUrl = cover,

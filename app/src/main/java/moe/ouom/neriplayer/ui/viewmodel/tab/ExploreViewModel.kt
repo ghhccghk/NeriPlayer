@@ -54,6 +54,8 @@ import moe.ouom.neriplayer.core.player.PlayerManager.neteaseClient
 import moe.ouom.neriplayer.data.auth.netease.NeteaseCookieRepository
 import moe.ouom.neriplayer.data.auth.common.SavedCookieAuthState
 import moe.ouom.neriplayer.data.model.NeteaseArtistSummary
+import moe.ouom.neriplayer.data.platform.kugou.KUGOU_ALBUM_PREFIX
+import moe.ouom.neriplayer.data.platform.kugou.stableKugouSongId
 import moe.ouom.neriplayer.data.platform.youtube.buildYouTubeMusicMediaUri
 import moe.ouom.neriplayer.data.platform.youtube.stableYouTubeMusicId
 import moe.ouom.neriplayer.data.platform.youtube.youtubeMusicThumbnailUrl
@@ -63,6 +65,7 @@ import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.util.search.searchValues
 import moe.ouom.neriplayer.util.search.SearchTextMatcher
 import org.json.JSONObject
+import java.io.IOException
 
 private const val TAG = "NERI-ExploreVM"
 private const val NETEASE_SEARCH_PAGE_SIZE = 30
@@ -593,12 +596,18 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
                     async(Dispatchers.IO) {
                         try {
                             val details = AppContainer.kugouSearchApi.getSongInfo(info.id)
+                            val infoDeferred = async { AppContainer.kugouClient.getPrivilegeLite(info.id) }
+                            val infoResponse = infoDeferred.await()
+                            val data = infoResponse.body["data"]?.jsonArray?.get(0)?.jsonObject
+                                ?: throw IOException("Empty response for ${info.id}")
+
+                            val album_id = data["album_audio_id"]?.jsonPrimitive?.content?.toLongOrNull() ?: stableKugouSongId(info.id)
                             SongItem(
-                                id = info.id.hashCode().toLong(),
+                                id = stableKugouSongId(info.id),
                                 name = info.songName,
                                 artist = details.singer,
                                 album = details.album,
-                                albumId = info.id.hashCode().toLong(),
+                                albumId = album_id ,
                                 matchedLyric = details.lyric,
                                 durationMs = parseDurationToMs(info.duration),
                                 coverUrl = info.coverUrl,
@@ -608,11 +617,11 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
                         } catch (e: Exception) {
                             // 降级：如果获取详情失败，保留基本信息
                             SongItem(
-                                id = info.id.hashCode().toLong(),
+                                id = stableKugouSongId(info.id),
                                 name = info.songName,
                                 artist = info.singer,
-                                album = info.albumName ?: "Kugou",
-                                albumId = info.id.hashCode().toLong(),
+                                album = (info.albumName ?: "").let { "${KUGOU_ALBUM_PREFIX}$it" },
+                                albumId = stableKugouSongId(info.id),
                                 durationMs = parseDurationToMs(info.duration),
                                 coverUrl = info.coverUrl,
                                 channelId = "kugou",

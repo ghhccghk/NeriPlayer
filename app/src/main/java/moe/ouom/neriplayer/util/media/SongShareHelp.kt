@@ -3,6 +3,7 @@ package moe.ouom.neriplayer.util.media
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.data.local.media.LocalSongSupport
 import moe.ouom.neriplayer.data.model.SongItem
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
 import moe.ouom.neriplayer.data.platform.youtube.extractYouTubeMusicVideoId
 import java.net.URI
 import java.util.Locale
@@ -84,9 +85,4 @@ private fun isNeteaseSong(song: SongItem): Boolean {
 private fun isBilibiliSong(song: SongItem): Boolean {
     if (song.channelId.equals("bilibili", ignoreCase = true)) return true
     return song.album.startsWith(PlayerManager.BILI_SOURCE_TAG)
-}
-
-private fun isKugouSong(song: SongItem): Boolean {
-    if (song.channelId.equals("kugou", ignoreCase = true)) return true
-    return song.album.startsWith(PlayerManager.KuGou_SOURCE_TAG)
 }

@@ -1,5 +1,6 @@
 package moe.ouom.neriplayer.util.media
 
+import moe.ouom.neriplayer.core.api.search.MusicPlatform
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.data.local.media.LocalSongSupport
 import moe.ouom.neriplayer.data.model.SongItem
@@ -209,6 +210,49 @@ class SongShareHelpTest {
         assertFalse(isShareablePublicHttpUrl("ftp://music.163.com/song"))
     }
 
+    @Test
+    fun `kugou channel builds share url with hash and album audio id`() {
+        val song = song(
+            id = 100L,
+            album = "KugouAlbum",
+            channelId = "kugou",
+            audioId = "abc123hash",
+            albumId = 100L,
+        )
+        assertEquals(
+            "https://activity.kugou.com/share/v-98650b10/index.html?hash=abc123hash&album_audio_id=100",
+            buildRemoteSongShareUrl(song, emptyList()),
+        )
+    }
+
+    @Test
+    fun `kugou album prefix without channelId still detected`() {
+        val song = song(
+            id = 200L,
+            album = "KugouSomeAlbum",
+            audioId = "def456hash",
+            albumId = 200L,
+        )
+        assertEquals(
+            "https://activity.kugou.com/share/v-98650b10/index.html?hash=def456hash&album_audio_id=200",
+            buildRemoteSongShareUrl(song, emptyList()),
+        )
+    }
+
+    @Test
+    fun `netease song with kugou matched lyric builds netease url not kugou url`() {
+        val song = song(
+            id = 42L,
+            album = "${PlayerManager.NETEASE_SOURCE_TAG}Album",
+            channelId = "netease",
+            matchedLyricSource = MusicPlatform.KUGOU,
+        )
+        assertEquals(
+            "https://music.163.com/#/song?id=42",
+            buildRemoteSongShareUrl(song, emptyList()),
+        )
+    }
+
     private fun song(
         id: Long,
         album: String,
@@ -217,16 +261,21 @@ class SongShareHelpTest {
         channelId: String? = null,
         name: String = "name",
         artist: String = "artist",
+        audioId: String? = null,
+        albumId: Long = 0L,
+        matchedLyricSource: MusicPlatform? = null,
     ): SongItem = SongItem(
         id = id,
         name = name,
         artist = artist,
         album = album,
-        albumId = 0L,
+        albumId = albumId,
         durationMs = 1_000L,
         coverUrl = null,
         mediaUri = mediaUri,
         localFilePath = localFilePath,
         channelId = channelId,
+        audioId = audioId,
+        matchedLyricSource = matchedLyricSource,
     )
 }
