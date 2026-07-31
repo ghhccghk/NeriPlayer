@@ -38,12 +38,15 @@ import moe.ouom.neriplayer.core.api.lyrics.extractPlainLyricsFromCollapsedTimedL
 import moe.ouom.neriplayer.core.api.lyrics.hasLrcTimestamp
 import moe.ouom.neriplayer.core.api.lyrics.isExternalLyricDurationCompatible
 import moe.ouom.neriplayer.core.api.netease.NeteaseClient
+import moe.ouom.neriplayer.core.api.search.KuGouSearchApi
 import moe.ouom.neriplayer.core.api.search.MusicPlatform
 import moe.ouom.neriplayer.core.api.youtube.YouTubeMusicClient
 import moe.ouom.neriplayer.core.player.download.AudioDownloadManager
 import moe.ouom.neriplayer.data.local.media.LocalMediaSupport
 import moe.ouom.neriplayer.data.local.media.isLocalSong
 import moe.ouom.neriplayer.data.model.stableKey
+import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
+import moe.ouom.neriplayer.data.platform.kugou.requireKugouHash
 import moe.ouom.neriplayer.data.platform.youtube.extractYouTubeMusicVideoId
 import moe.ouom.neriplayer.data.platform.youtube.isYouTubeMusicSong
 import moe.ouom.neriplayer.ui.component.lyrics.LyricEntry
@@ -615,7 +618,8 @@ internal object PlayerLyricsProvider {
         amllTtmlClient: AmllTtmlClient,
         amllLyricsEnabled: Boolean,
         ytMusicLyricsCache: LruCache<String, YouTubeMusicLyricsCacheEntry>,
-        biliSourceTag: String
+        biliSourceTag: String,
+        kugouSearchApi: KuGouSearchApi
     ): List<LyricEntry> {
         return withContext(Dispatchers.IO) {
             val isYouTubeMusicTrack = isYouTubeMusicSong(song)
@@ -690,6 +694,10 @@ internal object PlayerLyricsProvider {
             val platformLyrics = when {
                 song.album.startsWith(biliSourceTag) -> emptyList()
                 song.matchedLyricSource == MusicPlatform.QQ_MUSIC -> emptyList()
+                song.matchedLyricSource == MusicPlatform.KUGOU
+                    || (song.matchedLyricSource == null && isKugouSong(song)) -> {
+                    getKugouLyrics(song, kugouSearchApi)
+                }
                 song.matchedLyricSource == MusicPlatform.CLOUD_MUSIC -> {
                     val matchedId = song.matchedSongId?.toLongOrNull() ?: song.id
                     getNeteaseLyrics(matchedId, neteaseClient, neteaseLyricsCache)
@@ -706,6 +714,25 @@ internal object PlayerLyricsProvider {
                     requireDurationMatch = false
                 ).ifEmpty { platformLyrics }
             }
+        }
+    }
+
+    private suspend fun getKugouLyrics(
+        song: SongItem,
+        kugouSearchApi: KuGouSearchApi
+    ): List<LyricEntry> {
+        val hash = requireKugouHash(song) ?: return emptyList()
+        return try {
+            val lrcText = kugouSearchApi.searchAndFetchLyric(hash)
+            if (lrcText.isNullOrBlank()) {
+                NPLogger.d("NERI-PlayerManager", "Kugou lyrics not found for hash=$hash")
+                return emptyList()
+            }
+            NPLogger.d("NERI-PlayerManager", "Using Kugou lyrics for '${song.name}'")
+            parseNeteaseLyricsAuto(lrcText)
+        } catch (e: Exception) {
+            NPLogger.w("NERI-PlayerManager", "Failed to fetch Kugou lyrics for hash=$hash: ${e.message}")
+            emptyList()
         }
     }
 

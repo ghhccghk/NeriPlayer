@@ -749,7 +749,8 @@ internal suspend fun PlayerManager.getLyricsImpl(song: SongItem): List<LyricEntr
         amllTtmlClient = amllTtmlClient,
         amllLyricsEnabled = amllLyricsEnabled,
         ytMusicLyricsCache = ytMusicLyricsCache,
-        biliSourceTag = BILI_SOURCE_TAG
+        biliSourceTag = BILI_SOURCE_TAG,
+        kugouSearchApi = kuGouSearchApi
     )
 }
 
