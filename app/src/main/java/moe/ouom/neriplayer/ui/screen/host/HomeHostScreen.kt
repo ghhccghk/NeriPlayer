@@ -59,6 +59,7 @@ import moe.ouom.neriplayer.data.platform.youtube.stableYouTubeMusicId
 import moe.ouom.neriplayer.data.playlist.usage.PlaylistUsageRepository
 import moe.ouom.neriplayer.data.playlist.usage.UsageEntry
 import moe.ouom.neriplayer.ui.screen.playlist.BiliPlaylistDetailScreen
+import moe.ouom.neriplayer.ui.screen.playlist.KugouPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.LocalArtistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.LocalPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteaseAlbumDetailScreen
@@ -94,6 +95,7 @@ private sealed class HomeSelectedItem {
     data class LocalArtist(val artistName: String) : HomeSelectedItem()
     data class Bili(val playlist: BiliPlaylist) : HomeSelectedItem()
     data class YouTubeMusic(val playlist: YouTubeMusicPlaylist) : HomeSelectedItem()
+    data class Kugou(val playlist: PlaylistSummary) : HomeSelectedItem()
 }
 
 private val HomeSelectedItem?.navigationDepth: Int
@@ -150,6 +152,7 @@ fun HomeHostScreen(
     neteasePlaylistSourceRoute: (PlaylistSummary) -> String? = { null },
     neteaseAlbumSourceRoute: (AlbumSummary) -> String? = { null },
     biliPlaylistSourceRoute: (BiliPlaylist) -> String? = { null },
+    kugouPlaylistSourceRoute: (PlaylistSummary) -> String? = { null },
     localPlaylistSourceRoute: (Long) -> String? = { null },
     coherentFeedbackEnabled: Boolean = false,
     renderScene: @Composable (
@@ -515,6 +518,21 @@ fun HomeHostScreen(
                                     offlineMode = offlineMode
                                 )
                             }
+
+                            is HomeSelectedItem.Kugou -> {
+                                KugouPlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    onBack = { selected = null },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            kugouPlaylistSourceRoute(current.playlist)
+                                        )
+                                    },
+                                    offlineMode = offlineMode
+                                )
+                            }
                         }
                     }
                 }
@@ -551,6 +569,10 @@ private val homeSelectedItemSaver = mapSaver<HomeSelectedItem?>(
                 "type" to "ytmusic",
                 "playlist" to item.playlist.toSaveMap()
             )
+            is HomeSelectedItem.Kugou -> hashMapOf(
+                "type" to "kugou",
+                "playlist" to item.playlist.toSaveMap()
+            )
         }
     },
     restore = { saved ->
@@ -564,6 +586,7 @@ private val homeSelectedItemSaver = mapSaver<HomeSelectedItem?>(
             "netease" -> restorePlaylistSummary(saved["playlist"] as? Map<*, *>)?.let { HomeSelectedItem.Netease(it) }
             "bili" -> restoreBiliPlaylist(saved["playlist"] as? Map<*, *>)?.let { HomeSelectedItem.Bili(it) }
             "ytmusic" -> restoreYouTubeMusicPlaylist(saved["playlist"] as? Map<*, *>)?.let { HomeSelectedItem.YouTubeMusic(it) }
+            "kugou" -> restorePlaylistSummary(saved["playlist"] as? Map<*, *>)?.let { HomeSelectedItem.Kugou(it) }
             else -> null
         }
     }
@@ -643,6 +666,19 @@ private fun openRecent(
                         title = entry.name,
                         subtitle = "",
                         coverUrl = entry.picUrl ?: "",
+                        trackCount = entry.trackCount
+                    )
+                )
+            )
+        }
+        "kugou" -> {
+            onSelected(
+                HomeSelectedItem.Kugou(
+                    PlaylistSummary(
+                        id = entry.id,
+                        name = entry.name,
+                        picUrl = entry.picUrl ?: "",
+                        playCount = 0L,
                         trackCount = entry.trackCount
                     )
                 )

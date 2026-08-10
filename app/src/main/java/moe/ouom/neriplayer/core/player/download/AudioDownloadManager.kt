@@ -2886,8 +2886,8 @@ object AudioDownloadManager {
             if (response.status != 200) return@withContext null
 
             val data = response.body
-            val url = data["url"]?.jsonPrimitive?.content
-                ?: data["data"]?.jsonObject?.get("url")?.jsonPrimitive?.content
+
+            val url = extractDownloadKugouUrl(data)
                 ?: return@withContext null
 
             ResolvedDownloadSource(
@@ -2898,12 +2898,29 @@ object AudioDownloadManager {
         }
     }
 
+    private fun extractDownloadKugouUrl(json: JsonObject): String? {
+        // 优先从 url 数组里取
+        val urlList = (json["url"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+        if (urlList.isNotEmpty()) return urlList.first()
+
+        // url 为空时降级用 backupUrl
+        val backupList = (json["backupUrl"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+        return backupList.firstOrNull()
+    }
+
     private suspend fun downloadKugouLyrics(song: SongItem): String? {
         return withContext(Dispatchers.IO) {
             val hash = requireKugouHash(song) ?: return@withContext null
             runCatching {
                 val lyric = AppContainer.kugouSearchApi.getSongInfo(hash).lyric
-                Log.d("KugouLyric", "歌词:${lyric}, hash:${hash}")
                 lyric
             }.getOrNull()
         }

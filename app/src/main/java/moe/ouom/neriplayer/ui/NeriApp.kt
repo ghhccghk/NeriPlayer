@@ -238,6 +238,7 @@ import moe.ouom.neriplayer.ui.screen.host.SettingsHostScreen
 import moe.ouom.neriplayer.ui.screen.host.rememberHomeHostRuntimeState
 import moe.ouom.neriplayer.ui.screen.tab.shouldShowHomeContinueSection
 import moe.ouom.neriplayer.ui.screen.playlist.BiliPlaylistDetailScreen
+import moe.ouom.neriplayer.ui.screen.playlist.KugouPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.LocalPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteaseAlbumDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteasePlaylistDetailScreen
@@ -297,6 +298,7 @@ private val TRANSPARENT_MAIN_TAB_DETAIL_ROUTES = setOf(
     Destinations.BiliUploaderDetail.route,
     Destinations.YouTubeMusicCreatorDetail.route,
     Destinations.YouTubeMusicPlaylistDetail.route,
+    Destinations.KugouPlaylistDetail.route,
     Destinations.LocalPlaylistDetail.route,
     Destinations.Recent.route,
     Destinations.PlaybackStats.route,
@@ -2256,6 +2258,10 @@ private fun NeriAppContent(
         return "local_playlist_detail/$id"
     }
 
+    fun kugouPlaylistSourceRoute(playlist: PlaylistSummary): String {
+        return "kugou_playlist_detail/${Uri.encode(navigationGson.toJson(playlist))}"
+    }
+
     val activeCoverSeedHex = resolveActiveCoverSeedHex(
         visualCoverUrl = playbackVisualCoverUrl,
         sampledCoverUrl = coverSeed?.coverUrl,
@@ -2782,6 +2788,7 @@ private fun NeriAppContent(
                         neteasePlaylistSourceRoute = ::neteasePlaylistSourceRoute,
                         neteaseAlbumSourceRoute = ::neteaseAlbumSourceRoute,
                         biliPlaylistSourceRoute = ::biliPlaylistSourceRoute,
+                        kugouPlaylistSourceRoute = ::kugouPlaylistSourceRoute,
                         localPlaylistSourceRoute = ::localPlaylistSourceRoute,
                         coherentFeedbackEnabled = coherentFeedbackEnabled,
                         renderScene = { revealTop, translationY, scale, sceneDepth, sceneContent ->
@@ -3720,6 +3727,48 @@ private fun NeriAppContent(
                                             playlist = playlist,
                                             onBack = { navController.popBackStack() },
                                             onSongClick = ::playSongsAndOpenNowPlaying,
+                                            offlineMode = offlineMode
+                                        )
+                                    }
+                                }
+
+                                composable(
+                                    route = Destinations.KugouPlaylistDetail.route,
+                                    arguments = listOf(navArgument("playlistJson") {
+                                        type = NavType.StringType
+                                    }),
+                                    enterTransition = {
+                                        transparentDetailEnterTransition(coherentFeedbackEnabled)
+                                    },
+                                    exitTransition = {
+                                        transparentDetailExitTransition(coherentFeedbackEnabled)
+                                    },
+                                    popEnterTransition = {
+                                        transparentDetailPopEnterTransition(coherentFeedbackEnabled)
+                                    },
+                                    popExitTransition = {
+                                        transparentDetailPopExitTransition(coherentFeedbackEnabled)
+                                    }
+                                ) { backStackEntry ->
+                                    val playlistJson = backStackEntry.arguments
+                                        ?.getString("playlistJson")
+                                    val kugouPlaylist = navigationGson.fromJson(
+                                        playlistJson,
+                                        PlaylistSummary::class.java
+                                    )
+                                    RenderNavHostScene(
+                                        Destinations.KugouPlaylistDetail.route
+                                    ) {
+                                        KugouPlaylistDetailScreen(
+                                            playlist = kugouPlaylist,
+                                            onBack = { navController.popBackStack() },
+                                            onSongClick = { songs, index ->
+                                                playSongsAndOpenNowPlaying(
+                                                    songs = songs,
+                                                    index = index,
+                                                    sourceRoute = kugouPlaylistSourceRoute(kugouPlaylist)
+                                                )
+                                            },
                                             offlineMode = offlineMode
                                         )
                                     }
