@@ -224,7 +224,7 @@ internal fun exploreSearchSourceDisplayOrder(
             SearchSource.YOUTUBE_MUSIC,
             SearchSource.NETEASE,
             SearchSource.BILIBILI,
-            SearchSource.LINK_RECOGNITION
+            SearchSource.LINK_RECOGNITION,
             SearchSource.KUGOU
         )
     } else {
@@ -232,7 +232,7 @@ internal fun exploreSearchSourceDisplayOrder(
             SearchSource.NETEASE,
             SearchSource.BILIBILI,
             SearchSource.YOUTUBE_MUSIC,
-            SearchSource.KUGOU
+            SearchSource.KUGOU,
             SearchSource.LINK_RECOGNITION
         )
     }
@@ -283,6 +283,7 @@ private fun searchSourceLabel(source: SearchSource): String {
         SearchSource.NETEASE -> stringResource(R.string.platform_netease_short)
         SearchSource.BILIBILI -> stringResource(R.string.platform_bilibili)
         SearchSource.LINK_RECOGNITION -> stringResource(R.string.explore_tab_links)
+        SearchSource.KUGOU -> stringResource(R.string.platform_kugou)
     }
 }
 
@@ -317,7 +318,6 @@ private fun youtubeSearchTypeIcon(type: YouTubeExploreSearchType): ImageVector {
         YouTubeExploreSearchType.SONG -> Icons.Outlined.MusicNote
         YouTubeExploreSearchType.VIDEO -> Icons.Filled.PlayCircle
         YouTubeExploreSearchType.CREATOR -> Icons.Filled.AccountCircle
-        SearchSource.KUGOU -> stringResource(R.string.platform_kugou)
     }
 }
 

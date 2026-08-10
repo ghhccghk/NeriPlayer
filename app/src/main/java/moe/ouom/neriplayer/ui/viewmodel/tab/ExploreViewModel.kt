@@ -248,9 +248,9 @@ internal fun rankExploreSongSearchResults(
                 .thenBy { it.index }
         )
         .map { it.song } +
-        scoredSongs
-            .filter { it.score == null }
-            .map { it.song }
+            scoredSongs
+                .filter { it.score == null }
+                .map { it.song }
 }
 
 private data class RankedSongSearchResult(
@@ -456,11 +456,11 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
             "search start: source=$source, request=$requestVersion, keyword=$apiKeyword, display=$matchQuery"
         )
         when (source) {
-            SearchSource.NETEASE -> searchNetease(keyword, requestVersion)
-            SearchSource.BILIBILI -> searchBilibili(keyword, requestVersion)
-            SearchSource.YOUTUBE_MUSIC -> searchYouTubeMusic(keyword, requestVersion)
-            SearchSource.KUGOU -> searchKugou(keyword, requestVersion)
+            SearchSource.NETEASE -> searchNetease(apiKeyword, matchQuery, requestVersion)
+            SearchSource.BILIBILI -> searchBilibili(apiKeyword, matchQuery, requestVersion)
+            SearchSource.YOUTUBE_MUSIC -> searchYouTubeMusic(apiKeyword, matchQuery, requestVersion)
             SearchSource.LINK_RECOGNITION -> searchRecognizedLink(apiKeyword, requestVersion)
+            SearchSource.KUGOU -> searchKugou(apiKeyword, matchQuery, requestVersion)
         }
     }
 
@@ -502,7 +502,8 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
                         page = nextPage
                     )
                     SearchSource.YOUTUBE_MUSIC,
-                    SearchSource.LINK_RECOGNITION -> return@launch
+                    SearchSource.LINK_RECOGNITION,
+                    SearchSource.KUGOU -> return@launch
                 }
                 updateSearchStateIfCurrent(requestVersion, source) {
                     val merged = mergeExploreSearchResults(it.searchItems, result.items)
@@ -584,7 +585,7 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** 搜索 酷狗 音乐 */
-    private fun searchKugou(keyword: String, requestVersion: Long) {
+    private fun searchKugou(keyword: String, matchQuery: String, requestVersion: Long) {
         searchJob = viewModelScope.launch {
             try {
                 val results = withContext(Dispatchers.IO) {
@@ -696,8 +697,7 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
-
-    private fun beginSearchRequest(): Long {
+    private fun beginSearchRequest(keyword: String, displayQuery: String): Long {
         searchJob?.cancel()
         searchMoreJob?.cancel()
         val requestVersion = invalidateSearchRequest()
@@ -1549,6 +1549,7 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
             SearchSource.BILIBILI -> app.getString(R.string.error_bilibili_search, fallback)
             SearchSource.YOUTUBE_MUSIC -> app.getString(R.string.error_youtube_search, fallback)
             SearchSource.LINK_RECOGNITION -> app.getString(R.string.error_link_recognition, fallback)
+            SearchSource.KUGOU -> app.getString(R.string.error_bilibili_search, fallback)
         }
     }
 }

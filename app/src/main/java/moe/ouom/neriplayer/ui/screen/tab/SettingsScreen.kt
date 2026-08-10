@@ -1,4 +1,4 @@
-﻿package moe.ouom.neriplayer.ui.screen.tab
+package moe.ouom.neriplayer.ui.screen.tab
 
 /*
  * NeriPlayer - A unified Android player for streaming music and videos from multiple online platforms.
@@ -28,7 +28,6 @@ import android.content.Intent
 import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Intent
 import android.net.Uri
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
@@ -1982,8 +1981,7 @@ fun SettingsScreen(
                             showKugouQualityDialog = showKuGouQualityDialog,
                             onShowKugouQualityDialogChange = { showKuGouQualityDialog = it },
                             showMobileDataKugouQualityDialog = showMobileDataKuGouQualityDialog,
-                            onShowMobileDataKugouQualityDialogChange = { showMobileDataKuGouQualityDialog = it}
-                            },
+                            onShowMobileDataKugouQualityDialogChange = { showMobileDataKuGouQualityDialog = it },
                             highlightTargetId = settingsHighlightTargetId,
                             highlightPulse = settingsHighlightPulse,
                             onHighlightFinished = onSettingsHighlightFinished

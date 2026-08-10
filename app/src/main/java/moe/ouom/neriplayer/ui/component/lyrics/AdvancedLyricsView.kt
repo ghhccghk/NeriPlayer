@@ -181,7 +181,6 @@ fun AdvancedLyricsView(
                 showPhonetic = false,
                 useBlurEffect = lyricBlurEnabled,
                 animateViewportScroll = animateViewportScroll,
-                userScrollEnabled = userScrollEnabled,
                 offset = effectiveOffset,
                 keepAliveZone = keepAliveZone,
                 bottomContentInset = bottomContentInset,

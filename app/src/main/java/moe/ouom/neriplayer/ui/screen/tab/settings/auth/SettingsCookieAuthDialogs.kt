@@ -415,7 +415,7 @@ internal fun SettingsKugouAuthDialogs(
             defaultBrowserLogin
         }
 
-        TwoTabCookieLoginSheet(
+        SettingsCookieLoginSheet(
             title = "酷狗音乐",
             initialTab = initialTab,
             inlineMsg = inlineMsg,

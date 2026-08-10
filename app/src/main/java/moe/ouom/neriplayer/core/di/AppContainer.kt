@@ -364,7 +364,6 @@ object AppContainer {
     }
 
     private val youtubeMusicClientDelegate = lazy {
-    val youtubeMusicClient by lazy {
         YouTubeMusicClient(
             authRepo = youtubeAuthRepo,
             okHttpClient = sharedOkHttpClient,

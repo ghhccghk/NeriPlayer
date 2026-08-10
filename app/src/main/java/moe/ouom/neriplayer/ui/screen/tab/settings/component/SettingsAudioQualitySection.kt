@@ -126,7 +126,6 @@ internal fun SettingsAudioQualitySection(
     onShowMobileDataBiliQualityDialogChange: (Boolean) -> Unit,
     showMobileDataKugouQualityDialog: Boolean,
     onShowMobileDataKugouQualityDialogChange: (Boolean) -> Unit,
-    onShowMobileDataBiliQualityDialogChange: (Boolean) -> Unit,
     highlightTargetId: String? = null,
     highlightPulse: Int = 0,
     onHighlightFinished: (() -> Unit)? = null
@@ -198,7 +197,10 @@ internal fun SettingsAudioQualitySection(
                 valueLabel = kugouQualityLabel,
                 preferredQuality = kugouPreferredQuality,
                 iconRes = R.drawable.ic_kugou,
-                onClick = { onShowKugouQualityDialogChange(true) }
+                onClick = { onShowKugouQualityDialogChange(true) },
+                highlightTargetId = highlightTargetId,
+                highlightPulse = highlightPulse,
+                onHighlightFinished = onHighlightFinished
             )
 
             AutoSettingsListItem(
@@ -285,7 +287,10 @@ internal fun SettingsAudioQualitySection(
                     valueLabel = mobileDataKugouQualityLabel,
                     preferredQuality = mobileDataKugouAudioQuality,
                     iconRes = R.drawable.ic_kugou,
-                    onClick = { onShowMobileDataKugouQualityDialogChange(true) }
+                    onClick = { onShowMobileDataKugouQualityDialogChange(true) },
+                    highlightTargetId = highlightTargetId,
+                    highlightPulse = highlightPulse,
+                    onHighlightFinished = onHighlightFinished
                 )
             }
         }
