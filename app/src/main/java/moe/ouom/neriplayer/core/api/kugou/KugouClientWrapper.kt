@@ -29,6 +29,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import moe.ouom.neriplayer.core.logging.NPLogger
@@ -124,6 +125,15 @@ class KugouClientWrapper(
             } catch (e: Exception) {
                 NPLogger.w(TAG, "Failed to set deviceName: ${e.message}")
             }
+        }
+        // Override guid with deterministic device fingerprint to ensure
+        // stable identity even after EncryptedSharedPreferences corruption.
+        val deterministicGuid = generateDeterministicGuid()
+        if (sdk.cookieJar.getGuid() != deterministicGuid) {
+            NPLogger.d(TAG, "Guid mismatch, overriding with deterministic value.")
+            sdk.cookieJar.setGuid(deterministicGuid)
+            sdk.cookieJar.setMid(calculateMidFromGuid(deterministicGuid))
+            syncCookiesToRepository()
         }
         if (sdk.cookieJar.getDfid() == "-") {
             NPLogger.d(TAG, "dfid is unset, registering device...")
@@ -395,5 +405,36 @@ class KugouClientWrapper(
             batteryLevel = batteryLevel,
             batteryStatus = batteryStatus
         )
+    }
+
+    // ── Deterministic device identity ─────────────────────────────
+
+    /**
+     * Generates a deterministic guid from stable device information.
+     * Uses Android ID (per-app unique, stable across app restarts) combined
+     * with hardware identifiers to produce a consistent 32-char hex string.
+     *
+     * This ensures the same device always produces the same guid, even if
+     * EncryptedSharedPreferences is corrupted and re-created.
+     */
+    private fun generateDeterministicGuid(): String {
+        val androidId = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ANDROID_ID
+        ) ?: "unknown"
+        val seed = "$androidId:${Build.BRAND}:${Build.DEVICE}:${Build.MODEL}:${Build.SERIAL}"
+        val md = java.security.MessageDigest.getInstance("MD5")
+        val hash = md.digest(seed.toByteArray())
+        return hash.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Calculates the mid parameter from a guid, matching the SDK's
+     * PlatformIdentity.calculateMid() logic: mid = BigInt(MD5(guid)).
+     */
+    private fun calculateMidFromGuid(guid: String): String {
+        val md = java.security.MessageDigest.getInstance("MD5")
+        val md5Hex = md.digest(guid.toByteArray()).joinToString("") { "%02x".format(it) }
+        return java.math.BigInteger(md5Hex, 16).toString()
     }
 }
