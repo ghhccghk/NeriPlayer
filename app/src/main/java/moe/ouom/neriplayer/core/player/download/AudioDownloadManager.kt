@@ -62,7 +62,8 @@ import moe.ouom.neriplayer.core.download.ManagedDownloadStorage
 import moe.ouom.neriplayer.core.download.storage.ManagedDownloadAtomicFile
 import moe.ouom.neriplayer.core.download.policy.shouldUseIndexedSidecarLookup
 import moe.ouom.neriplayer.core.player.PlayerManager
-import moe.ouom.neriplayer.core.player.resolver.youtube.ChunkRequestIOException
+import moe.ouom.neriplayer.core.player.engine.datasource.ChunkRequestIOException
+import moe.ouom.neriplayer.core.player.engine.datasource.ResumableHttpRangeSupport
 import moe.ouom.neriplayer.data.platform.kugou.isKugouSong
 import moe.ouom.neriplayer.data.platform.kugou.requireKugouHash
 import moe.ouom.neriplayer.core.player.resolver.netease.NeteasePlaybackResponseParser
@@ -188,7 +189,6 @@ object AudioDownloadManager {
         ConcurrentHashMap<String, ManagedDownloadStorage.StoredEntry>()
     private val partialSidecarReferencesBySongKey =
         ConcurrentHashMap<String, DownloadedSidecarReferences>()
-    private val sharedCoverReferencesByLookupKey = ConcurrentHashMap<String, String>()
     private val hlsResumeStatesByWorkingPath =
         ConcurrentHashMap<String, HlsResumeState>()
     private val retryWakeSignalVersion = MutableStateFlow(0L)
@@ -384,23 +384,28 @@ object AudioDownloadManager {
         val coverReference: String? = null,
         val lyricReference: String? = null,
         val translatedLyricReference: String? = null,
+        val romanizedLyricReference: String? = null,
         val createdCover: Boolean = false,
         val createdLyric: Boolean = false,
-        val createdTranslatedLyric: Boolean = false
+        val createdTranslatedLyric: Boolean = false,
+        val createdRomanizedLyric: Boolean = false
     ) {
         val isEmpty: Boolean
             get() = coverReference.isNullOrBlank() &&
                 lyricReference.isNullOrBlank() &&
-                translatedLyricReference.isNullOrBlank()
+                translatedLyricReference.isNullOrBlank() &&
+                romanizedLyricReference.isNullOrBlank()
 
         fun retainCreatedOnly(): DownloadedSidecarReferences {
             return DownloadedSidecarReferences(
                 coverReference = coverReference.takeIf { createdCover },
                 lyricReference = lyricReference.takeIf { createdLyric },
                 translatedLyricReference = translatedLyricReference.takeIf { createdTranslatedLyric },
+                romanizedLyricReference = romanizedLyricReference.takeIf { createdRomanizedLyric },
                 createdCover = createdCover && !coverReference.isNullOrBlank(),
                 createdLyric = createdLyric && !lyricReference.isNullOrBlank(),
-                createdTranslatedLyric = createdTranslatedLyric && !translatedLyricReference.isNullOrBlank()
+                createdTranslatedLyric = createdTranslatedLyric && !translatedLyricReference.isNullOrBlank(),
+                createdRomanizedLyric = createdRomanizedLyric && !romanizedLyricReference.isNullOrBlank()
             )
         }
     }
@@ -451,7 +456,7 @@ object AudioDownloadManager {
         }
         return if (
             YouTubeGoogleVideoRangeSupport.shouldUseChunkedRangeForDownload(request) &&
-            !YouTubeGoogleVideoRangeSupport.hasExplicitRangeHeader(headers)
+            !ResumableHttpRangeSupport.hasExplicitRangeHeader(headers)
         ) {
             DownloadTransportKind.CHUNKED_RANGE
         } else {
@@ -536,7 +541,7 @@ object AudioDownloadManager {
         resumedBytes: Long,
         isPartialResponse: Boolean
     ): Long? {
-        val resolvedTotal = YouTubeGoogleVideoRangeSupport.resolveTotalContentLength(
+        val resolvedTotal = ResumableHttpRangeSupport.resolveTotalContentLength(
             requestUrl,
             headers
         )
@@ -975,84 +980,6 @@ object AudioDownloadManager {
         partialSidecarReferencesBySongKey.remove(songKey)
     }
 
-    internal fun buildSharedCoverLookupKeys(song: SongItem): List<String> {
-        val remoteCoverKeys = buildRemoteCoverLookupKeys(song)
-        return linkedSetOf<String>().apply {
-            remoteCoverKeys.forEach { add("url:$it") }
-            if (remoteCoverKeys.isEmpty()) {
-                song.identity().album.takeIf(String::isNotBlank)?.let { add("album:$it") }
-            }
-        }.toList()
-    }
-
-    private fun buildRemoteCoverLookupKeys(song: SongItem): List<String> {
-        return linkedSetOf<String>().apply {
-            song.customCoverUrl?.trim()?.takeIf(String::isNotBlank)?.let(::add)
-            song.coverUrl?.trim()?.takeIf(String::isNotBlank)?.let(::add)
-            song.originalCoverUrl?.trim()?.takeIf(String::isNotBlank)?.let(::add)
-        }.toList()
-    }
-
-    private suspend fun findSharedCoverReference(
-        context: Context,
-        song: SongItem,
-        excludedAudioName: String? = null,
-        allowIndexedLookup: Boolean = true
-    ): String? {
-        val lookupKeys = buildSharedCoverLookupKeys(song)
-        if (lookupKeys.isEmpty()) {
-            return null
-        }
-        val fastSnapshot = if (allowIndexedLookup) {
-            null
-        } else {
-            ManagedDownloadStorage.cachedDownloadLibrarySnapshot(
-                context = context,
-                restorePersisted = false
-            )
-        }
-        for (lookupKey in lookupKeys) {
-            val rememberedReference = sharedCoverReferencesByLookupKey[lookupKey] ?: continue
-            if (!allowIndexedLookup) {
-                if (rememberedReference in fastSnapshot?.knownReferences.orEmpty()) {
-                    return rememberedReference
-                }
-                sharedCoverReferencesByLookupKey.remove(lookupKey, rememberedReference)
-                continue
-            }
-            if (ManagedDownloadStorage.exists(context, rememberedReference)) {
-                return rememberedReference
-            }
-            sharedCoverReferencesByLookupKey.remove(lookupKey, rememberedReference)
-        }
-        if (!allowIndexedLookup) {
-            val snapshot = fastSnapshot ?: return null
-            return ManagedDownloadStorage.findReusableCoverReference(
-                snapshot = snapshot,
-                song = song,
-                excludedAudioName = excludedAudioName
-            )?.also { indexedReference ->
-                rememberSharedCoverReference(song, indexedReference)
-            }
-        }
-        val indexedReference = ManagedDownloadStorage.findReusableCoverReference(
-            context = context,
-            song = song,
-            excludedAudioName = excludedAudioName
-        )
-        if (!indexedReference.isNullOrBlank()) {
-            rememberSharedCoverReference(song, indexedReference)
-        }
-        return indexedReference
-    }
-
-    private fun rememberSharedCoverReference(song: SongItem, coverReference: String?) {
-        val normalizedReference = coverReference?.takeIf(String::isNotBlank) ?: return
-        buildSharedCoverLookupKeys(song).forEach { lookupKey ->
-            sharedCoverReferencesByLookupKey.putIfAbsent(lookupKey, normalizedReference)
-        }
-    }
-
     internal fun mergeDownloadedSidecarReferences(
         existing: DownloadedSidecarReferences?,
         incoming: DownloadedSidecarReferences?
@@ -1079,6 +1006,14 @@ object AudioDownloadManager {
                 existingCreated = existing?.createdTranslatedLyric ?: false,
                 incomingReference = incoming?.translatedLyricReference,
                 incomingCreated = incoming?.createdTranslatedLyric ?: false
+            ),
+            romanizedLyricReference = incoming?.romanizedLyricReference
+                ?: existing?.romanizedLyricReference,
+            createdRomanizedLyric = mergeSidecarCreatedFlag(
+                existingReference = existing?.romanizedLyricReference,
+                existingCreated = existing?.createdRomanizedLyric ?: false,
+                incomingReference = incoming?.romanizedLyricReference,
+                incomingCreated = incoming?.createdRomanizedLyric ?: false
             )
         )
     }
@@ -1689,7 +1624,8 @@ object AudioDownloadManager {
             DownloadedSidecarReferences(
                 coverReference = coverReference,
                 lyricReference = lyricReferences.lyricReference,
-                translatedLyricReference = lyricReferences.translatedLyricReference
+                translatedLyricReference = lyricReferences.translatedLyricReference,
+                romanizedLyricReference = lyricReferences.romanizedLyricReference
             )
         } else {
             coroutineScope {
@@ -1722,7 +1658,8 @@ object AudioDownloadManager {
                 DownloadedSidecarReferences(
                     coverReference = coverReference,
                     lyricReference = lyricReferences.lyricReference,
-                    translatedLyricReference = lyricReferences.translatedLyricReference
+                    translatedLyricReference = lyricReferences.translatedLyricReference,
+                    romanizedLyricReference = lyricReferences.romanizedLyricReference
                 )
             }
         }
@@ -1750,7 +1687,6 @@ object AudioDownloadManager {
                 null
             }
         if (!existingCover.isNullOrBlank()) {
-            rememberSharedCoverReference(song, existingCover)
             rememberPartialSidecarReferences(
                 songKey,
                 DownloadedSidecarReferences(
@@ -1759,24 +1695,6 @@ object AudioDownloadManager {
                 )
             )
             return existingCover
-        }
-
-        val sharedCover = findSharedCoverReference(
-            context = context,
-            song = song,
-            excludedAudioName = storedAudio.name,
-            allowIndexedLookup = allowIndexedLookup
-        )
-        if (!sharedCover.isNullOrBlank()) {
-            rememberSharedCoverReference(song, sharedCover)
-            rememberPartialSidecarReferences(
-                songKey,
-                DownloadedSidecarReferences(
-                    coverReference = sharedCover,
-                    createdCover = false
-                )
-            )
-            return sharedCover
         }
 
         try {
@@ -1812,7 +1730,6 @@ object AudioDownloadManager {
                         null
                     }
                     if (!committedCoverReference.isNullOrBlank()) {
-                        rememberSharedCoverReference(song, committedCoverReference)
                         rememberPartialSidecarReferences(
                             songKey,
                             DownloadedSidecarReferences(
@@ -1841,7 +1758,7 @@ object AudioDownloadManager {
         return null
     }
 
-    private fun buildCoverSidecarFileName(baseName: String, songKey: String): String {
+    internal fun buildCoverSidecarFileName(baseName: String, songKey: String): String {
         val suffix = java.lang.Long.toHexString(songKey.hashCode().toLong() and 0xffffffffL)
         return "$baseName-$suffix.jpg"
     }
@@ -2527,6 +2444,13 @@ object AudioDownloadManager {
         return rawLyric == null
     }
 
+    internal fun shouldFetchRomanizedLyricForDownload(
+        shouldFetchPrimaryLyric: Boolean,
+        shouldFetchTranslatedLyric: Boolean
+    ): Boolean {
+        return shouldFetchPrimaryLyric || shouldFetchTranslatedLyric
+    }
+
     /** 下载歌词文件 */
     private suspend fun downloadLyrics(
         context: Context,
@@ -2539,6 +2463,7 @@ object AudioDownloadManager {
     ): DownloadedSidecarReferences {
         var lyricReference: String? = null
         var translatedLyricReference: String? = null
+        var romanizedLyricReference: String? = null
         try {
             ensureSongDownloadNotCancelled(
                 songKey = songKey,
@@ -2549,9 +2474,14 @@ object AudioDownloadManager {
             )
             var lyricText = resolveLocalLyricForDownload(song.matchedLyric)
             var translatedText = resolveLocalLyricForDownload(song.matchedTranslatedLyric)
+            var romanizedText: String? = null
             val shouldFetchPrimaryLyric = shouldFetchRemoteLyricForDownload(song.matchedLyric)
             val shouldFetchTranslatedLyric =
                 shouldFetchRemoteLyricForDownload(song.matchedTranslatedLyric)
+            val shouldFetchRomanizedLyric = shouldFetchRomanizedLyricForDownload(
+                shouldFetchPrimaryLyric = shouldFetchPrimaryLyric,
+                shouldFetchTranslatedLyric = shouldFetchTranslatedLyric
+            )
             if (lyricText != null) {
                 NPLogger.d(TAG, context.getString(R.string.download_lyrics_matched, song.name))
             }
@@ -2573,13 +2503,17 @@ object AudioDownloadManager {
                     val downloaded = downloadNeteaseLyrics(
                         song = song,
                         shouldFetchPrimaryLyric = shouldFetchPrimaryLyric && lyricText == null,
-                        shouldFetchTranslatedLyric = shouldFetchTranslatedLyric && translatedText == null
+                        shouldFetchTranslatedLyric = shouldFetchTranslatedLyric && translatedText == null,
+                        shouldFetchRomanizedLyric = shouldFetchRomanizedLyric && romanizedText == null
                     )
                     if (lyricText == null && shouldFetchPrimaryLyric) {
                         lyricText = downloaded.lyricText
                     }
                     if (translatedText == null && shouldFetchTranslatedLyric) {
                         translatedText = downloaded.translatedText
+                    }
+                    if (romanizedText == null && shouldFetchRomanizedLyric) {
+                        romanizedText = downloaded.romanizedText
                     }
                 }
             }
@@ -2636,6 +2570,31 @@ object AudioDownloadManager {
                     NPLogger.d(TAG, "翻译歌词写入完成: song=${song.name}, reference=$reference")
                 }
             }
+            romanizedText?.takeIf { it.isNotBlank() }?.let { lyric ->
+                ensureSongDownloadNotCancelled(
+                    songKey = songKey,
+                    stage = "lyrics_romanized_write",
+                    batchSessionId = batchSessionId,
+                    attemptId = attemptId,
+                    requireActiveAttempt = requireActiveAttempt
+                )
+                romanizedLyricReference = ManagedDownloadStorage.writeRomanizedLyrics(
+                    context = context,
+                    songId = song.id,
+                    baseName = baseName,
+                    content = lyric
+                )
+                romanizedLyricReference?.let { reference ->
+                    rememberPartialSidecarReferences(
+                        songKey,
+                        DownloadedSidecarReferences(
+                            romanizedLyricReference = reference,
+                            createdRomanizedLyric = true
+                        )
+                    )
+                    NPLogger.d(TAG, "音译歌词写入完成: song=${song.name}, reference=$reference")
+                }
+            }
         } catch (cancellation: java.util.concurrent.CancellationException) {
             NPLogger.d(TAG, "歌词整理阶段收到取消: ${song.name}")
             throw cancellation
@@ -2645,8 +2604,10 @@ object AudioDownloadManager {
         return DownloadedSidecarReferences(
             lyricReference = lyricReference,
             translatedLyricReference = translatedLyricReference,
+            romanizedLyricReference = romanizedLyricReference,
             createdLyric = !lyricReference.isNullOrBlank(),
-            createdTranslatedLyric = !translatedLyricReference.isNullOrBlank()
+            createdTranslatedLyric = !translatedLyricReference.isNullOrBlank(),
+            createdRomanizedLyric = !romanizedLyricReference.isNullOrBlank()
         )
     }
 
@@ -2699,21 +2660,31 @@ object AudioDownloadManager {
     private fun downloadNeteaseLyrics(
         song: SongItem,
         shouldFetchPrimaryLyric: Boolean = true,
-        shouldFetchTranslatedLyric: Boolean = true
+        shouldFetchTranslatedLyric: Boolean = true,
+        shouldFetchRomanizedLyric: Boolean = true
     ): DownloadedLyrics {
-        if (!shouldFetchPrimaryLyric && !shouldFetchTranslatedLyric) {
+        if (!shouldFetchPrimaryLyric && !shouldFetchTranslatedLyric && !shouldFetchRomanizedLyric) {
             return DownloadedLyrics()
         }
 
-        if (!shouldFetchPrimaryLyric) {
+        if (!shouldFetchPrimaryLyric && !shouldFetchRomanizedLyric) {
             try {
                 val lyrics = AppContainer.neteaseClient.getLyricNew(song.id)
                 val root = JSONObject(lyrics)
                 if (root.optInt("code") == 200) {
                     val tlyric: String = root.optJSONObject("tlyric")?.optString("lyric").orEmpty()
+                    val romalrc = root.optJSONObject("romalrc")?.optString("lyric").orEmpty()
                     if (shouldFetchTranslatedLyric && tlyric.isNotBlank()) {
                         NPLogger.d(TAG, "翻译歌词保存: ${song.name}")
-                        return DownloadedLyrics(translatedText = tlyric)
+                        return DownloadedLyrics(
+                            translatedText = tlyric,
+                            romanizedText = romalrc.takeIf {
+                                shouldFetchRomanizedLyric && it.isNotBlank()
+                            }
+                        )
+                    }
+                    if (shouldFetchRomanizedLyric && romalrc.isNotBlank()) {
+                        return DownloadedLyrics(romanizedText = romalrc)
                     }
                 }
             } catch (e: Exception) {
@@ -2730,6 +2701,7 @@ object AudioDownloadManager {
             val yrc: String = root.optJSONObject("yrc")?.optString("lyric") ?: ""
             val lrc: String = root.optJSONObject("lrc")?.optString("lyric") ?: ""
             val translated: String = root.optJSONObject("tlyric")?.optString("lyric") ?: ""
+            val romanized: String = root.optJSONObject("romalrc")?.optString("lyric") ?: ""
             val preferredLyric = if (shouldFetchPrimaryLyric) {
                 yrc.takeIf { it.isNotBlank() } ?: lrc.takeIf { it.isNotBlank() }
             } else {
@@ -2748,6 +2720,9 @@ object AudioDownloadManager {
                 lyricText = preferredLyric,
                 translatedText = translated.takeIf {
                     shouldFetchTranslatedLyric && it.isNotBlank()
+                },
+                romanizedText = romanized.takeIf {
+                    shouldFetchRomanizedLyric && it.isNotBlank()
                 }
             )
         } catch (e: Exception) {
@@ -2876,6 +2851,10 @@ object AudioDownloadManager {
 
     fun getTranslatedLyricContent(context: Context, song: SongItem): String? {
         return ManagedDownloadStorage.readLyrics(context, song, translated = true)
+    }
+
+    fun getRomanizedLyricContent(context: Context, song: SongItem): String? {
+        return ManagedDownloadStorage.readRomanizedLyrics(context, song)
     }
 
 
@@ -3098,7 +3077,8 @@ object AudioDownloadManager {
 
     private data class DownloadedLyrics(
         val lyricText: String? = null,
-        val translatedText: String? = null
+        val translatedText: String? = null,
+        val romanizedText: String? = null
     )
 
     private fun ensureHttps(url: String): String = if (url.startsWith("http://")) url.replaceFirst("http://", "https://") else url
@@ -3327,7 +3307,7 @@ object AudioDownloadManager {
         attemptId: Long? = null
     ): DownloadedPayloadSummary = withContext(Dispatchers.IO) {
         if (YouTubeGoogleVideoRangeSupport.shouldUseChunkedRangeForDownload(request) &&
-            !YouTubeGoogleVideoRangeSupport.hasExplicitRangeHeader(
+            !ResumableHttpRangeSupport.hasExplicitRangeHeader(
                 request.headers.names().associateWith { headerName ->
                     request.header(headerName).orEmpty()
                 }
@@ -3490,7 +3470,7 @@ object AudioDownloadManager {
         }
 
         var downloadedBytes = resumedBytes
-        var totalBytes = YouTubeGoogleVideoRangeSupport.resolveQueryContentLength(request.url.toString()) ?: 0L
+        var totalBytes = ResumableHttpRangeSupport.resolveQueryContentLength(request.url.toString()) ?: 0L
         FileOutputStream(destFile, resumedBytes > 0L).sink().buffer().use { sink ->
             while (true) {
                 ensureDownloadNotCancelled(songId, songKey, destFile, batchSessionId, attemptId)
@@ -3505,7 +3485,7 @@ object AudioDownloadManager {
                 }
 
                 try {
-                    val chunkResult = YouTubeGoogleVideoRangeSupport.executeChunkLengthFallback(
+                    val chunkResult = ResumableHttpRangeSupport.executeChunkLengthFallback(
                         requestLength = remainingRequestLength,
                         preferredChunkSize = YOUTUBE_DOWNLOAD_PREFERRED_CHUNK_SIZE_BYTES
                     ) { chunkLength ->
@@ -3532,7 +3512,7 @@ object AudioDownloadManager {
                     totalBytes = chunkResult.value.totalBytes
                     if (
                         chunkResult.chunkLength !=
-                        YouTubeGoogleVideoRangeSupport.candidateChunkLengths(
+                        ResumableHttpRangeSupport.candidateChunkLengths(
                             requestLength = remainingRequestLength,
                             preferredChunkSize = YOUTUBE_DOWNLOAD_PREFERRED_CHUNK_SIZE_BYTES
                         ).first()
@@ -3597,7 +3577,7 @@ object AudioDownloadManager {
         batchSessionId: Long? = null,
         attemptId: Long? = null
     ): ChunkDownloadResult {
-        val baseChunkRequest = YouTubeGoogleVideoRangeSupport.buildChunkedRequest(
+        val baseChunkRequest = ResumableHttpRangeSupport.buildChunkedRequest(
             request = request,
             start = start,
             length = requestedChunkLength
@@ -3636,7 +3616,7 @@ object AudioDownloadManager {
                     throw IOException("分块响应偏移不匹配: expected=$start, actual=$responseStart")
                 }
                 var downloadedBytes = currentDownloadedBytes
-                var totalBytes = YouTubeGoogleVideoRangeSupport.resolveTotalContentLength(
+                var totalBytes = ResumableHttpRangeSupport.resolveTotalContentLength(
                     uri = request.url.toString().toUri(),
                     headers = responseHeaders
                 ) ?: currentTotalBytes
@@ -3646,7 +3626,7 @@ object AudioDownloadManager {
                     headers = responseHeaders,
                     expectedContentLength = totalBytes.takeIf { it > 0L }
                 )
-                val actualChunkLength = YouTubeGoogleVideoRangeSupport.resolveChunkResponseLength(
+                val actualChunkLength = ResumableHttpRangeSupport.resolveChunkResponseLength(
                     requestedLength = requestedChunkLength,
                     headers = responseHeaders,
                     delegateOpenLength = response.body.contentLength()

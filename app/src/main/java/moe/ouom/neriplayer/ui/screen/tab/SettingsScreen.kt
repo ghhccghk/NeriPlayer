@@ -37,10 +37,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SizeTransform
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,6 +66,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.MeetingRoom
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.material.icons.outlined.RestartAlt
@@ -126,6 +124,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.core.download.GlobalDownloadManager
@@ -160,9 +159,12 @@ import moe.ouom.neriplayer.data.settings.normalizeLyricFontScale
 import moe.ouom.neriplayer.data.settings.scaledLyricFontSize
 import moe.ouom.neriplayer.data.storage.StorageCacheClearOptions
 import moe.ouom.neriplayer.data.storage.StorageUsageSummary
+import moe.ouom.neriplayer.data.storage.analyzeStorageUsage
 import moe.ouom.neriplayer.listentogether.invite.configuredListenTogetherBaseUrlOrNull
 import moe.ouom.neriplayer.listentogether.invite.isDefaultListenTogetherBaseUrl
+import moe.ouom.neriplayer.listentogether.invite.parseListenTogetherInvite
 import moe.ouom.neriplayer.listentogether.invite.resolveListenTogetherBaseUrl
+import moe.ouom.neriplayer.listentogether.invite.resolveListenTogetherInviteJoinBaseUrl
 import moe.ouom.neriplayer.listentogether.validation.validateListenTogetherNickname
 import moe.ouom.neriplayer.ui.component.settings.LanguageSettingItem
 import moe.ouom.neriplayer.util.platform.LanguageManager
@@ -186,6 +188,7 @@ import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsLyricsSectio
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsMotionSection
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsPlaybackSection
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsStorageCacheSection
+import moe.ouom.neriplayer.ui.screen.tab.settings.component.StorageCacheDetailsContent
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsTrafficManagementSection
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.ThemeModeActionButton
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.ThemeSeedListItem
@@ -262,6 +265,42 @@ private fun isForwardSettingsPageTransition(
     if (targetPage.backTargetPage() == initialPage) return true
     if (initialPage.backTargetPage() == targetPage) return false
     return targetPage.ordinal >= initialPage.ordinal
+}
+
+@Composable
+internal fun SettingsPageHost(
+    activePage: SettingsPage?,
+    splitLayout: Boolean,
+    isolateAdvancedGlassTransitions: Boolean,
+    content: @Composable (SettingsPage?) -> Unit
+) {
+    if (splitLayout) {
+        AdvancedGlassScene(active = true) {
+            content(activePage)
+        }
+        return
+    }
+
+    AnimatedContent(
+        targetState = activePage,
+        modifier = Modifier.fillMaxSize(),
+        label = "settings_page_switch",
+        transitionSpec = {
+            isolatedAdvancedGlassHorizontalTransition(
+                forward = isForwardSettingsPageTransition(initialState, targetState)
+            ).using(SizeTransform(clip = true))
+        }
+    ) { selectedPage ->
+        AdvancedGlassNavigationHandoff(
+            enabled = isolateAdvancedGlassTransitions && transition.isRunning
+        ) {
+            AdvancedGlassScene(
+                active = isolateAdvancedGlassTransitions || selectedPage == activePage
+            ) {
+                content(selectedPage)
+            }
+        }
+    }
 }
 
 private fun Context.neteaseQualityLabel(value: String): String {
@@ -580,6 +619,7 @@ fun SettingsScreen(
     val listenTogetherApi = remember { AppContainer.listenTogetherApi }
     val listenTogetherSessionManager = remember { AppContainer.listenTogetherSessionManager }
     val listenTogetherSessionState by listenTogetherSessionManager.sessionState.collectAsState()
+    val listenTogetherWorkerBaseUrl by listenTogetherPreferences.workerBaseUrlFlow.collectAsState(initial = "")
     val listenTogetherWorkerBaseUrlInput by listenTogetherPreferences.workerBaseUrlInputFlow.collectAsState(initial = "")
     val listenTogetherNickname by listenTogetherPreferences.nicknameFlow.collectAsState(initial = "")
     var pendingBackgroundImageBlur by rememberSaveable(backgroundImageUri) {
@@ -626,11 +666,18 @@ fun SettingsScreen(
     var clearImageCache by remember { mutableStateOf(true) }
     var clearDownloadStagingCache by remember { mutableStateOf(false) }
     var clearSharedMediaCache by remember { mutableStateOf(false) }
-    var clearPlatformListCache by remember { mutableStateOf(false) }
+    var clearLyricsCache by remember { mutableStateOf(false) }
+    var clearNeteasePlaylistCache by remember { mutableStateOf(false) }
+    var clearBiliFavoriteCache by remember { mutableStateOf(false) }
+    var clearBiliArchiveCache by remember { mutableStateOf(false) }
+    var clearYoutubePlaylistCache by remember { mutableStateOf(false) }
+    var clearLogFiles by remember { mutableStateOf(false) }
+    var clearCrashLogs by remember { mutableStateOf(false) }
 
     // 存储占用详情状态
-    var showStorageDetails by remember { mutableStateOf(false) }
     var storageDetails by remember { mutableStateOf(StorageUsageSummary.Empty) }
+    var storageDetailsLoading by remember { mutableStateOf(false) }
+    var storageScanRequest by rememberSaveable { mutableIntStateOf(0) }
 
 
     // 各种对话框和弹窗的显示状态 //
@@ -662,9 +709,13 @@ fun SettingsScreen(
     var showListenTogetherResetUuidDialog by remember { mutableStateOf(false) }
     var showListenTogetherServerDialog by remember { mutableStateOf(false) }
     var showListenTogetherNicknameDialog by remember { mutableStateOf(false) }
+    var showListenTogetherJoinDialog by remember { mutableStateOf(false) }
     var listenTogetherServerInput by rememberSaveable { mutableStateOf("") }
     var listenTogetherNicknameInput by rememberSaveable { mutableStateOf("") }
     var listenTogetherNicknameError by remember { mutableStateOf<String?>(null) }
+    var listenTogetherInviteInput by remember { mutableStateOf("") }
+    var listenTogetherInviteError by remember { mutableStateOf<String?>(null) }
+    var listenTogetherJoining by remember { mutableStateOf(false) }
     var listenTogetherServerTesting by remember { mutableStateOf(false) }
     var listenTogetherServerTestMessage by remember { mutableStateOf<String?>(null) }
     // ------------------------------------
@@ -1034,36 +1085,33 @@ fun SettingsScreen(
     val homeTrendingLabelRes = if (internationalEnabled) {
         R.string.home_ytmusic_guess_you_like
     } else {
-        R.string.recommend_trending
+        R.string.settings_home_card_netease_trending
     }
     val homeRadarLabelRes = if (internationalEnabled) {
         R.string.home_ytmusic_daily_discover
     } else {
-        R.string.recommend_radar
+        R.string.settings_home_card_netease_radar
     }
     val homeRecommendedLabelRes = if (internationalEnabled) {
         R.string.home_ytmusic_more_recommendations
     } else {
-        R.string.recommend_for_you
+        R.string.settings_home_card_netease_recommended
     }
     val homeTrendingSupportingRes = if (internationalEnabled) {
         R.string.settings_home_card_ytmusic_guess_you_like_desc
     } else {
-        null
+        R.string.settings_home_card_netease_trending_desc
     }
     val homeRadarSupportingRes = if (internationalEnabled) {
         R.string.settings_home_card_ytmusic_daily_discover_desc
     } else {
-        null
+        R.string.settings_home_card_netease_radar_desc
     }
     val homeRecommendedSupportingRes = if (internationalEnabled) {
         R.string.settings_home_card_ytmusic_more_recommendations_desc
     } else {
-        null
+        R.string.settings_home_card_netease_recommended_desc
     }
-    val neteaseHomeCardAuthHealth by AppContainer.neteaseCookieRepo.authHealthFlow.collectAsStateWithLifecycleCompat()
-    val neteaseHomeCardsEnabled = internationalEnabled ||
-        neteaseHomeCardAuthHealth.state != SavedCookieAuthState.Missing
     val effectiveDefaultStartDestination = remember(defaultStartDestination, homeStartAvailable) {
         if (!homeStartAvailable && defaultStartDestination == "home") {
             "explore"
@@ -1140,6 +1188,27 @@ fun SettingsScreen(
     val isSettingsSplitLayout = currentWindowWidthDp() >= 840.dp
     var activeSettingsPage by rememberSaveable {
         mutableStateOf(if (isSettingsSplitLayout) SettingsPage.General else null)
+    }
+    fun refreshStorageDetails() {
+        if (storageDetailsLoading) return
+        storageScanRequest++
+    }
+
+    LaunchedEffect(storageScanRequest) {
+        if (storageScanRequest == 0) return@LaunchedEffect
+        storageDetailsLoading = true
+        yield()
+        try {
+            storageDetails = analyzeStorageUsage(context)
+        } finally {
+            storageDetailsLoading = false
+        }
+    }
+
+    LaunchedEffect(activeSettingsPage) {
+        if (activeSettingsPage == SettingsPage.StorageCacheDetails && storageDetails == StorageUsageSummary.Empty) {
+            refreshStorageDetails()
+        }
     }
     LaunchedEffect(activeSettingsPage, context) {
         if (activeSettingsPage == SettingsPage.Backup) {
@@ -1274,35 +1343,16 @@ fun SettingsScreen(
         }
     }
 
-    AnimatedContent(
-        targetState = activeSettingsPage,
-        modifier = Modifier.fillMaxSize(),
-        label = "settings_page_switch",
-        transitionSpec = {
-            if (isSettingsSplitLayout) {
-                EnterTransition.None togetherWith ExitTransition.None
-            } else {
-                isolatedAdvancedGlassHorizontalTransition(
-                    forward = isForwardSettingsPageTransition(initialState, targetState)
-                ).using(SizeTransform(clip = true))
-            }
-        }
-    ) { selectedPage ->
-        AdvancedGlassNavigationHandoff(
-            enabled = isolateAdvancedGlassTransitions && transition.isRunning
-        ) {
-            AdvancedGlassScene(
-                active = isolateAdvancedGlassTransitions || selectedPage == activeSettingsPage
-            ) {
-                if (selectedPage == null) {
-                    MiuixSettingsHomeScaffold(
-                        listState = listState,
-                        topAppBarState = homeTopAppBarState,
-                        title = settingsHomeTitle,
-                        content = settingsHomeContent
-                    )
-                } else {
-                    MiuixSettingsResponsiveDetailScaffold(
+    val settingsPageContent: @Composable (SettingsPage?) -> Unit = { selectedPage ->
+        if (selectedPage == null) {
+            MiuixSettingsHomeScaffold(
+                listState = listState,
+                topAppBarState = homeTopAppBarState,
+                title = settingsHomeTitle,
+                content = settingsHomeContent
+            )
+        } else {
+            MiuixSettingsResponsiveDetailScaffold(
                 title = stringResource(selectedPage.titleRes),
                 onBack = ::navigateBackFromActiveSettingsPage,
                 listState = detailListStates.getValue(selectedPage),
@@ -1314,7 +1364,7 @@ fun SettingsScreen(
                 homeTopAppBarState = homeTopAppBarState,
                 homeTitle = settingsHomeTitle,
                 homeContent = settingsHomeContent
-                ) {
+            ) {
                 item(key = "${selectedPage.name}:header") {
                     MiuixSettingsHeader(
                         icon = selectedPage.icon,
@@ -1556,7 +1606,7 @@ fun SettingsScreen(
                 }
 
                 SettingsPage.Personalization -> {
-                    for (cardIndex in 0..5) {
+                    for (cardIndex in 0..4) {
                         item(key = "${selectedPage.name}:card:$cardIndex") {
                             SettingsPersonalizationPageContent(
                                 autoSettingsRepository = autoSettingsRepository,
@@ -1570,7 +1620,6 @@ fun SettingsScreen(
                                 homeTrendingSupportingRes = homeTrendingSupportingRes,
                                 homeRadarSupportingRes = homeRadarSupportingRes,
                                 homeRecommendedSupportingRes = homeRecommendedSupportingRes,
-                                neteaseHomeCardsEnabled = neteaseHomeCardsEnabled,
                                 homeStartAvailable = homeStartAvailable,
                                 showHomeContinueCard = showHomeContinueCard,
                                 onShowHomeContinueCardChange = onShowHomeContinueCardChange,
@@ -1580,8 +1629,6 @@ fun SettingsScreen(
                                 onShowHomeRadarCardChange = onShowHomeRadarCardChange,
                                 showHomeRecommendedCard = showHomeRecommendedCard,
                                 onShowHomeRecommendedCardChange = onShowHomeRecommendedCardChange,
-                                lyricFontScales = lyricFontScales,
-                                onLyricFontScaleChange = onLyricFontScaleChange,
                                 backgroundImageUri = backgroundImageUri,
                                 onPickBackgroundImage = {
                                     photoPickerLauncher.launch(
@@ -1669,7 +1716,7 @@ fun SettingsScreen(
                 }
 
                 SettingsPage.Lyrics -> {
-                    for (cardIndex in 0..2) {
+                    for (cardIndex in 0..3) {
                         item(key = "${selectedPage.name}:card:$cardIndex") {
                             SettingsLyricsSection(
                                 expanded = true,
@@ -1681,6 +1728,17 @@ fun SettingsScreen(
                                 scope = scope,
                                 floatingLyricsPreferences = floatingLyricsPreferences,
                                 onFloatingLyricsPreferencesChange = onFloatingLyricsPreferencesChange,
+                                lyricsAppearanceContent = {
+                                    SettingsLyricsAppearanceContent(
+                                        autoSettingsRepository = autoSettingsRepository,
+                                        scope = scope,
+                                        lyricFontScales = lyricFontScales,
+                                        onLyricFontScaleChange = onLyricFontScaleChange,
+                                        highlightTargetId = settingsHighlightTargetId,
+                                        highlightPulse = settingsHighlightPulse,
+                                        onHighlightFinished = onSettingsHighlightFinished
+                                    )
+                                },
                                 cloudMusicLyricDefaultOffsetMs = cloudMusicLyricDefaultOffsetMs,
                                 onCloudMusicLyricDefaultOffsetMsChange =
                                     onCloudMusicLyricDefaultOffsetMsChange,
@@ -2010,10 +2068,11 @@ fun SettingsScreen(
                                 onDownloadFileNameTemplateChange = onDownloadFileNameTemplateChange,
                                 maxCacheSizeBytes = maxCacheSizeBytes,
                                 onMaxCacheSizeBytesChange = onMaxCacheSizeBytesChange,
-                                showStorageDetails = showStorageDetails,
-                                onShowStorageDetailsChange = { showStorageDetails = it },
+                                onOpenStorageDetails = {
+                                    activeSettingsPage = SettingsPage.StorageCacheDetails
+                                    refreshStorageDetails()
+                                },
                                 storageDetails = storageDetails,
-                                onStorageDetailsChange = { storageDetails = it },
                                 showClearCacheDialog = showClearCacheDialog,
                                 onShowClearCacheDialogChange = { showClearCacheDialog = it },
                                 clearAudioCache = clearAudioCache,
@@ -2024,8 +2083,20 @@ fun SettingsScreen(
                                 onClearDownloadStagingCacheChange = { clearDownloadStagingCache = it },
                                 clearSharedMediaCache = clearSharedMediaCache,
                                 onClearSharedMediaCacheChange = { clearSharedMediaCache = it },
-                                clearPlatformListCache = clearPlatformListCache,
-                                onClearPlatformListCacheChange = { clearPlatformListCache = it },
+                                clearLyricsCache = clearLyricsCache,
+                                onClearLyricsCacheChange = { clearLyricsCache = it },
+                                clearNeteasePlaylistCache = clearNeteasePlaylistCache,
+                                onClearNeteasePlaylistCacheChange = { clearNeteasePlaylistCache = it },
+                                clearBiliFavoriteCache = clearBiliFavoriteCache,
+                                onClearBiliFavoriteCacheChange = { clearBiliFavoriteCache = it },
+                                clearBiliArchiveCache = clearBiliArchiveCache,
+                                onClearBiliArchiveCacheChange = { clearBiliArchiveCache = it },
+                                clearYoutubePlaylistCache = clearYoutubePlaylistCache,
+                                onClearYoutubePlaylistCacheChange = { clearYoutubePlaylistCache = it },
+                                clearLogFiles = clearLogFiles,
+                                onClearLogFilesChange = { clearLogFiles = it },
+                                clearCrashLogs = clearCrashLogs,
+                                onClearCrashLogsChange = { clearCrashLogs = it },
                                 downloadStagingClearEnabled = !hasActiveDownloadOperations,
                                 onClearCacheClick = onClearCacheClick,
                                 cardIndex = cardIndex,
@@ -2034,6 +2105,35 @@ fun SettingsScreen(
                                 onHighlightFinished = onSettingsHighlightFinished
                             )
                         }
+                    }
+                }
+
+                SettingsPage.StorageCacheDetails -> {
+                    item(key = "${selectedPage.name}:content") {
+                        StorageCacheDetailsContent(
+                            storageDetails = storageDetails,
+                            isScanning = storageDetailsLoading,
+                            onRefresh = ::refreshStorageDetails,
+                            onClearCache = {
+                                activeSettingsPage = SettingsPage.Storage
+                                showClearCacheDialog = true
+                            },
+                            onOpenSystemSettings = {
+                                runCatching {
+                                    val intent = Intent(
+                                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        "package:${context.packageName}".toUri()
+                                    )
+                                    context.startActivity(intent)
+                                }.onFailure {
+                                    showSettingsMessage(
+                                        composeResources.getString(
+                                            R.string.storage_open_system_settings_failed
+                                        )
+                                    )
+                                }
+                            }
+                        )
                     }
                 }
 
@@ -2128,6 +2228,23 @@ fun SettingsScreen(
                                 ) == true,
                             isInRoom = !listenTogetherSessionState.roomId.isNullOrBlank(),
                             nickname = listenTogetherNickname,
+                            onOpenJoinRoomDialog = {
+                                if (listenTogetherSessionState.roomId.isNullOrBlank()) {
+                                    val clipboardText = runCatching {
+                                        context.getSystemService(ClipboardManager::class.java)
+                                            ?.primaryClip
+                                            ?.takeIf { it.itemCount > 0 }
+                                            ?.getItemAt(0)
+                                            ?.coerceToText(context)
+                                            ?.toString()
+                                    }.getOrNull()
+                                    listenTogetherInviteInput = clipboardText
+                                        ?.takeIf { parseListenTogetherInvite(it) != null }
+                                        .orEmpty()
+                                    listenTogetherInviteError = null
+                                    showListenTogetherJoinDialog = true
+                                }
+                            },
                             onOpenServerDialog = {
                                 listenTogetherServerTestMessage = null
                                 showListenTogetherServerDialog = true
@@ -2183,12 +2300,17 @@ fun SettingsScreen(
                         )
                     }
                 }
-                    }
                 }
             }
         }
     }
-    }
+
+    SettingsPageHost(
+        activePage = activeSettingsPage,
+        splitLayout = isSettingsSplitLayout,
+        isolateAdvancedGlassTransitions = isolateAdvancedGlassTransitions,
+        content = settingsPageContent
+    )
 
     SettingsNeteaseAuthDialogs(
         showSheet = showNeteaseSheet,
@@ -2396,6 +2518,136 @@ fun SettingsScreen(
                         listenTogetherNicknameInput = listenTogetherNickname
                         listenTogetherNicknameError = null
                     }
+                ) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+    if (showListenTogetherJoinDialog) {
+        MiuixSettingsDialog(
+            onDismissRequest = {
+                if (!listenTogetherJoining) {
+                    showListenTogetherJoinDialog = false
+                    listenTogetherInviteInput = ""
+                    listenTogetherInviteError = null
+                }
+            },
+            title = { Text(stringResource(R.string.listen_together_join_room)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(stringResource(R.string.settings_listen_together_join_room_desc))
+                    MiuixSettingsTextField(
+                        value = listenTogetherInviteInput,
+                        onValueChange = {
+                            listenTogetherInviteInput = it
+                            listenTogetherInviteError = null
+                        },
+                        enabled = !listenTogetherJoining,
+                        minLines = 2,
+                        maxLines = 5,
+                        label = {
+                            Text(
+                                stringResource(
+                                    R.string.settings_listen_together_join_invite_input_label
+                                )
+                            )
+                        },
+                        placeholder = {
+                            Text(
+                                stringResource(
+                                    R.string.settings_listen_together_join_invite_input_placeholder
+                                )
+                            )
+                        }
+                    )
+                    listenTogetherInviteError?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (listenTogetherJoining) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text(
+                                text = stringResource(R.string.listen_together_joining_room),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                MiuixSettingsTextButton(
+                    onClick = {
+                        if (listenTogetherJoining) {
+                            return@MiuixSettingsTextButton
+                        }
+                        val invite = parseListenTogetherInvite(listenTogetherInviteInput)
+                        if (invite == null) {
+                            listenTogetherInviteError = composeResources.getString(
+                                R.string.settings_listen_together_join_invite_invalid
+                            )
+                            return@MiuixSettingsTextButton
+                        }
+                        if (!listenTogetherSessionState.roomId.isNullOrBlank()) {
+                            listenTogetherInviteError = composeResources.getString(
+                                R.string.settings_listen_together_join_room_disabled
+                            )
+                            return@MiuixSettingsTextButton
+                        }
+                        scope.launch {
+                            listenTogetherJoining = true
+                            listenTogetherInviteError = null
+                            runCatching {
+                                val joinBaseUrl = resolveListenTogetherInviteJoinBaseUrl(
+                                    invite = invite,
+                                    savedBaseUrlInput = listenTogetherWorkerBaseUrlInput,
+                                    savedBaseUrl = listenTogetherWorkerBaseUrl
+                                )
+                                listenTogetherSessionManager.joinRoom(
+                                    baseUrl = joinBaseUrl,
+                                    roomId = invite.roomId,
+                                    userUuid = listenTogetherPreferences.getOrCreateUserUuid(),
+                                    nickname = listenTogetherPreferences.getOrCreateNickname(),
+                                    joinSecret = invite.joinSecret
+                                )
+                                listenTogetherSessionManager.connectWebSocket()
+                            }.onSuccess {
+                                showListenTogetherJoinDialog = false
+                                listenTogetherInviteInput = ""
+                            }.onFailure { error ->
+                                listenTogetherInviteError = error.message ?: error.javaClass.simpleName
+                            }
+                            listenTogetherJoining = false
+                        }
+                    },
+                    enabled = !listenTogetherJoining
+                ) {
+                    Text(
+                        stringResource(
+                            if (listenTogetherJoining) {
+                                R.string.listen_together_joining_room
+                            } else {
+                                R.string.listen_together_join_room
+                            }
+                        )
+                    )
+                }
+            },
+            dismissButton = {
+                MiuixSettingsTextButton(
+                    onClick = {
+                        showListenTogetherJoinDialog = false
+                        listenTogetherInviteInput = ""
+                        listenTogetherInviteError = null
+                    },
+                    enabled = !listenTogetherJoining
                 ) {
                     Text(stringResource(R.string.action_cancel))
                 }
@@ -3018,7 +3270,6 @@ private fun SettingsPersonalizationPageContent(
     homeTrendingSupportingRes: Int?,
     homeRadarSupportingRes: Int?,
     homeRecommendedSupportingRes: Int?,
-    neteaseHomeCardsEnabled: Boolean,
     homeStartAvailable: Boolean,
     showHomeContinueCard: Boolean,
     onShowHomeContinueCardChange: (Boolean) -> Unit,
@@ -3028,8 +3279,6 @@ private fun SettingsPersonalizationPageContent(
     onShowHomeRadarCardChange: (Boolean) -> Unit,
     showHomeRecommendedCard: Boolean,
     onShowHomeRecommendedCardChange: (Boolean) -> Unit,
-    lyricFontScales: LyricFontScales,
-    onLyricFontScaleChange: (LyricFontScaleTarget, Float) -> Unit,
     backgroundImageUri: String?,
     onPickBackgroundImage: () -> Unit,
     onClearBackgroundImage: () -> Unit,
@@ -3078,16 +3327,7 @@ private fun SettingsPersonalizationPageContent(
         val nowPlayingProgressShowAudioSpec by autoSettingsRepository
             .nowPlayingProgressShowAudioSpecFlow
             .collectAsState(initial = true)
-        val showLyricTranslation by autoSettingsRepository.showLyricTranslationFlow.collectAsState(initial = true)
-        val lyricTranslationUsePhonetic by autoSettingsRepository.lyricTranslationUsePhoneticFlow.collectAsState(
-            initial = false
-        )
-
-        if (shouldShowCard(0)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
+        if (shouldShowCard(0)) PersonalizationDetailCard {
             MiuixSettingsSectionIntro(
                 title = stringResource(R.string.settings_personalization_start_section),
                 description = stringResource(R.string.settings_personalization_start_section_desc)
@@ -3128,24 +3368,11 @@ private fun SettingsPersonalizationPageContent(
             )
         }
 
-        if (shouldShowCard(1)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
+        if (shouldShowCard(1)) PersonalizationDetailCard {
             MiuixSettingsSectionIntro(
                 title = stringResource(R.string.settings_personalization_home_section),
                 description = stringResource(R.string.settings_personalization_home_section_desc)
             )
-            if (!neteaseHomeCardsEnabled && !internationalEnabled) {
-                Text(
-                    text = stringResource(R.string.settings_home_card_netease_login_required),
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
             SettingsHomeCardSwitch(
                 title = stringResource(R.string.player_continue),
                 icon = Icons.Outlined.History,
@@ -3163,7 +3390,6 @@ private fun SettingsPersonalizationPageContent(
                 icon = Icons.Outlined.Bolt,
                 checked = showHomeTrendingCard,
                 onCheckedChange = onShowHomeTrendingCardChange,
-                enabled = neteaseHomeCardsEnabled,
                 targetId = "setting:home_card_trending",
                 highlightTargetId = highlightTargetId,
                 highlightPulse = highlightPulse,
@@ -3176,7 +3402,6 @@ private fun SettingsPersonalizationPageContent(
                 icon = if (internationalEnabled) Icons.Outlined.Explore else Icons.Outlined.Radar,
                 checked = showHomeRadarCard,
                 onCheckedChange = onShowHomeRadarCardChange,
-                enabled = neteaseHomeCardsEnabled,
                 targetId = "setting:home_card_radar",
                 highlightTargetId = highlightTargetId,
                 highlightPulse = highlightPulse,
@@ -3205,11 +3430,7 @@ private fun SettingsPersonalizationPageContent(
             }
         }
 
-        if (shouldShowCard(2)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
+        if (shouldShowCard(2)) PersonalizationDetailCard {
             MiuixSettingsSectionIntro(
                 title = stringResource(R.string.settings_personalization_playback_info_section),
                 description = stringResource(R.string.settings_personalization_playback_info_section_desc)
@@ -3292,11 +3513,7 @@ private fun SettingsPersonalizationPageContent(
             )
         }
 
-        if (shouldShowCard(3)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
+        if (shouldShowCard(3)) PersonalizationDetailCard {
             MiuixSettingsSectionIntro(
                 title = stringResource(R.string.settings_personalization_playback_controls_section),
                 description = stringResource(R.string.settings_personalization_playback_controls_section_desc)
@@ -3358,105 +3575,7 @@ private fun SettingsPersonalizationPageContent(
             )
         }
 
-        if (shouldShowCard(4)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
-            MiuixSettingsSectionIntro(
-                title = stringResource(R.string.settings_personalization_lyrics_scale_section),
-                description = stringResource(R.string.settings_personalization_lyrics_scale_section_desc)
-            )
-            PersonalizationSwitchItem(
-                setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.SHOW_LYRIC_TRANSLATION),
-                checked = showLyricTranslation,
-                onCheckedChange = { enabled ->
-                    scope.launch { autoSettingsRepository.setShowLyricTranslation(enabled) }
-                },
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-            PersonalizationSwitchItem(
-                setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.LYRIC_TRANSLATION_USE_PHONETIC),
-                checked = lyricTranslationUsePhonetic,
-                onCheckedChange = { enabled ->
-                    scope.launch { autoSettingsRepository.setLyricTranslationUsePhonetic(enabled) }
-                },
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-            MiuixSettingsSectionIntro(
-                title = stringResource(R.string.settings_lyrics_cover_page_section),
-                description = stringResource(R.string.settings_lyrics_cover_page_section_desc)
-            )
-            LyricFontScaleSettingsItem(
-                setting = AutoSettingsMetadata.requireSetting(
-                    AutoSettingsKeys.NOWPLAYING_COVER_LYRIC_FONT_SCALE
-                ),
-                currentScale = lyricFontScales.coverLyric,
-                onScaleCommit = { scale ->
-                    onLyricFontScaleChange(LyricFontScaleTarget.COVER_LYRIC, scale)
-                },
-                sampleText = stringResource(R.string.settings_lyrics_sample),
-                sampleBaseSizeSp = 18f,
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-            LyricFontScaleSettingsItem(
-                setting = AutoSettingsMetadata.requireSetting(
-                    AutoSettingsKeys.NOWPLAYING_COVER_TRANSLATION_FONT_SCALE
-                ),
-                currentScale = lyricFontScales.coverTranslation,
-                onScaleCommit = { scale ->
-                    onLyricFontScaleChange(LyricFontScaleTarget.COVER_TRANSLATION, scale)
-                },
-                sampleText = stringResource(R.string.settings_lyrics_translation_sample),
-                sampleBaseSizeSp = 14f,
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-            MiuixSettingsSectionIntro(
-                title = stringResource(R.string.settings_lyrics_page_section),
-                description = stringResource(R.string.settings_lyrics_page_section_desc)
-            )
-            LyricFontScaleSettingsItem(
-                setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.LYRICS_PAGE_LYRIC_FONT_SCALE),
-                currentScale = lyricFontScales.lyricsPageLyric,
-                onScaleCommit = { scale ->
-                    onLyricFontScaleChange(LyricFontScaleTarget.LYRICS_PAGE_LYRIC, scale)
-                },
-                sampleText = stringResource(R.string.settings_lyrics_sample),
-                sampleBaseSizeSp = 20f,
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-            LyricFontScaleSettingsItem(
-                setting = AutoSettingsMetadata.requireSetting(
-                    AutoSettingsKeys.LYRICS_PAGE_TRANSLATION_FONT_SCALE
-                ),
-                currentScale = lyricFontScales.lyricsPageTranslation,
-                onScaleCommit = { scale ->
-                    onLyricFontScaleChange(LyricFontScaleTarget.LYRICS_PAGE_TRANSLATION, scale)
-                },
-                sampleText = stringResource(R.string.settings_lyrics_translation_sample),
-                sampleBaseSizeSp = 16f,
-                highlightTargetId = highlightTargetId,
-                highlightPulse = highlightPulse,
-                onHighlightFinished = onHighlightFinished
-            )
-
-        }
-
-        if (shouldShowCard(5)) PersonalizationDetailCard(
-            highlighted = false,
-            highlightPulse = highlightPulse,
-            onHighlightFinished = onHighlightFinished
-        ) {
+        if (shouldShowCard(4)) PersonalizationDetailCard {
             MiuixSettingsSectionIntro(
                 title = stringResource(R.string.settings_personalization_background_section),
                 description = stringResource(R.string.settings_personalization_background_section_desc)
@@ -3530,16 +3649,113 @@ private fun SettingsPersonalizationPageContent(
 }
 
 @Composable
-private fun PersonalizationDetailCard(
-    highlighted: Boolean,
+private fun SettingsLyricsAppearanceContent(
+    autoSettingsRepository: AutoSettingsRepository,
+    scope: kotlinx.coroutines.CoroutineScope,
+    lyricFontScales: LyricFontScales,
+    onLyricFontScaleChange: (LyricFontScaleTarget, Float) -> Unit,
+    highlightTargetId: String?,
     highlightPulse: Int,
-    onHighlightFinished: (() -> Unit)?,
+    onHighlightFinished: (() -> Unit)?
+) {
+    val showLyricTranslation by autoSettingsRepository.showLyricTranslationFlow.collectAsState(initial = true)
+    val lyricTranslationUsePhonetic by autoSettingsRepository.lyricTranslationUsePhoneticFlow.collectAsState(
+        initial = false
+    )
+
+    MiuixSettingsSectionIntro(
+        title = stringResource(R.string.settings_lyrics_appearance_section),
+        description = stringResource(R.string.settings_lyrics_appearance_section_desc)
+    )
+    PersonalizationSwitchItem(
+        setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.SHOW_LYRIC_TRANSLATION),
+        checked = showLyricTranslation,
+        onCheckedChange = { enabled ->
+            scope.launch { autoSettingsRepository.setShowLyricTranslation(enabled) }
+        },
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+    PersonalizationSwitchItem(
+        setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.LYRIC_TRANSLATION_USE_PHONETIC),
+        checked = lyricTranslationUsePhonetic,
+        onCheckedChange = { enabled ->
+            scope.launch { autoSettingsRepository.setLyricTranslationUsePhonetic(enabled) }
+        },
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+    MiuixSettingsSectionIntro(
+        title = stringResource(R.string.settings_lyrics_cover_page_section),
+        description = stringResource(R.string.settings_lyrics_cover_page_section_desc)
+    )
+    LyricFontScaleSettingsItem(
+        setting = AutoSettingsMetadata.requireSetting(
+            AutoSettingsKeys.NOWPLAYING_COVER_LYRIC_FONT_SCALE
+        ),
+        currentScale = lyricFontScales.coverLyric,
+        onScaleCommit = { scale ->
+            onLyricFontScaleChange(LyricFontScaleTarget.COVER_LYRIC, scale)
+        },
+        sampleText = stringResource(R.string.settings_lyrics_sample),
+        sampleBaseSizeSp = 18f,
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+    LyricFontScaleSettingsItem(
+        setting = AutoSettingsMetadata.requireSetting(
+            AutoSettingsKeys.NOWPLAYING_COVER_TRANSLATION_FONT_SCALE
+        ),
+        currentScale = lyricFontScales.coverTranslation,
+        onScaleCommit = { scale ->
+            onLyricFontScaleChange(LyricFontScaleTarget.COVER_TRANSLATION, scale)
+        },
+        sampleText = stringResource(R.string.settings_lyrics_translation_sample),
+        sampleBaseSizeSp = 14f,
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+    MiuixSettingsSectionIntro(
+        title = stringResource(R.string.settings_lyrics_page_section),
+        description = stringResource(R.string.settings_lyrics_page_section_desc)
+    )
+    LyricFontScaleSettingsItem(
+        setting = AutoSettingsMetadata.requireSetting(AutoSettingsKeys.LYRICS_PAGE_LYRIC_FONT_SCALE),
+        currentScale = lyricFontScales.lyricsPageLyric,
+        onScaleCommit = { scale ->
+            onLyricFontScaleChange(LyricFontScaleTarget.LYRICS_PAGE_LYRIC, scale)
+        },
+        sampleText = stringResource(R.string.settings_lyrics_sample),
+        sampleBaseSizeSp = 20f,
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+    LyricFontScaleSettingsItem(
+        setting = AutoSettingsMetadata.requireSetting(
+            AutoSettingsKeys.LYRICS_PAGE_TRANSLATION_FONT_SCALE
+        ),
+        currentScale = lyricFontScales.lyricsPageTranslation,
+        onScaleCommit = { scale ->
+            onLyricFontScaleChange(LyricFontScaleTarget.LYRICS_PAGE_TRANSLATION, scale)
+        },
+        sampleText = stringResource(R.string.settings_lyrics_translation_sample),
+        sampleBaseSizeSp = 16f,
+        highlightTargetId = highlightTargetId,
+        highlightPulse = highlightPulse,
+        onHighlightFinished = onHighlightFinished
+    )
+}
+
+@Composable
+private fun PersonalizationDetailCard(
     content: @Composable () -> Unit
 ) {
     MiuixSettingsSectionCard(
-        highlighted = highlighted,
-        highlightPulse = highlightPulse,
-        onHighlightFinished = if (highlighted) onHighlightFinished else null,
         content = content
     )
 }
@@ -3558,7 +3774,9 @@ private fun PlaybackControlLayoutSettings(
     highlightPulse: Int,
     onHighlightFinished: (() -> Unit)?
 ) {
-    var selectedSetting by remember { mutableStateOf<PlaybackControlLayoutSetting?>(null) }
+    val selectedSetting = remember {
+        mutableStateOf<PlaybackControlLayoutSetting?>(null)
+    }
 
     PlaybackControlLayoutListItem(
         targetId = "setting:nowplaying_control_placement",
@@ -3566,7 +3784,9 @@ private fun PlaybackControlLayoutSettings(
         title = stringResource(R.string.settings_nowplaying_control_placement),
         description = stringResource(R.string.settings_nowplaying_control_placement_desc),
         value = nowPlayingControlPlacementLabel(preferences.nowPlayingPlacement),
-        onClick = { selectedSetting = PlaybackControlLayoutSetting.NOW_PLAYING_PLACEMENT },
+        onClick = {
+            selectedSetting.value = PlaybackControlLayoutSetting.NOW_PLAYING_PLACEMENT
+        },
         highlightTargetId = highlightTargetId,
         highlightPulse = highlightPulse,
         onHighlightFinished = onHighlightFinished
@@ -3577,7 +3797,9 @@ private fun PlaybackControlLayoutSettings(
         title = stringResource(R.string.settings_nowplaying_control_size),
         description = stringResource(R.string.settings_nowplaying_control_size_desc),
         value = playbackControlSizeLabel(preferences.nowPlayingSize),
-        onClick = { selectedSetting = PlaybackControlLayoutSetting.NOW_PLAYING_SIZE },
+        onClick = {
+            selectedSetting.value = PlaybackControlLayoutSetting.NOW_PLAYING_SIZE
+        },
         highlightTargetId = highlightTargetId,
         highlightPulse = highlightPulse,
         onHighlightFinished = onHighlightFinished
@@ -3588,13 +3810,15 @@ private fun PlaybackControlLayoutSettings(
         title = stringResource(R.string.settings_lyrics_control_size),
         description = stringResource(R.string.settings_lyrics_control_size_desc),
         value = playbackControlSizeLabel(preferences.lyricsSize),
-        onClick = { selectedSetting = PlaybackControlLayoutSetting.LYRICS_SIZE },
+        onClick = {
+            selectedSetting.value = PlaybackControlLayoutSetting.LYRICS_SIZE
+        },
         highlightTargetId = highlightTargetId,
         highlightPulse = highlightPulse,
         onHighlightFinished = onHighlightFinished
     )
 
-    val setting = selectedSetting ?: return
+    val setting = selectedSetting.value ?: return
     val title = when (setting) {
         PlaybackControlLayoutSetting.NOW_PLAYING_PLACEMENT ->
             stringResource(R.string.settings_nowplaying_control_placement)
@@ -3604,7 +3828,7 @@ private fun PlaybackControlLayoutSettings(
             stringResource(R.string.settings_lyrics_control_size)
     }
     MiuixSettingsDialog(
-        onDismissRequest = { selectedSetting = null },
+        onDismissRequest = { selectedSetting.value = null },
         title = { Text(title) },
         text = {
             Column {
@@ -3625,7 +3849,7 @@ private fun PlaybackControlLayoutSettings(
                                     onPreferencesChange(
                                         preferences.copy(nowPlayingPlacement = placement)
                                     )
-                                    selectedSetting = null
+                                    selectedSetting.value = null
                                 }
                             )
                         }
@@ -3639,7 +3863,6 @@ private fun PlaybackControlLayoutSettings(
                                     size == preferences.nowPlayingSize
                                 PlaybackControlLayoutSetting.LYRICS_SIZE ->
                                     size == preferences.lyricsSize
-                                PlaybackControlLayoutSetting.NOW_PLAYING_PLACEMENT -> false
                             }
                             MiuixSettingsChoiceRow(
                                 title = playbackControlSizeLabel(size),
@@ -3651,11 +3874,9 @@ private fun PlaybackControlLayoutSettings(
                                                 preferences.copy(nowPlayingSize = size)
                                             PlaybackControlLayoutSetting.LYRICS_SIZE ->
                                                 preferences.copy(lyricsSize = size)
-                                            PlaybackControlLayoutSetting.NOW_PLAYING_PLACEMENT ->
-                                                preferences
                                         }
                                     )
-                                    selectedSetting = null
+                                    selectedSetting.value = null
                                 }
                             )
                         }
@@ -3665,7 +3886,7 @@ private fun PlaybackControlLayoutSettings(
         },
         confirmButton = {
             MiuixSettingsTextButton(
-                onClick = { selectedSetting = null },
+                onClick = { selectedSetting.value = null },
                 text = { Text(stringResource(R.string.action_close)) }
             )
         }
@@ -3896,10 +4117,16 @@ private fun ListenTogetherSettingsSection(
     isUsingDefaultServer: Boolean,
     isInRoom: Boolean,
     nickname: String,
+    onOpenJoinRoomDialog: () -> Unit,
     onOpenServerDialog: () -> Unit,
     onResetIdentity: () -> Unit,
     onOpenNicknameDialog: () -> Unit
 ) {
+    val joinRoomItemModifier = if (isInRoom) {
+        Modifier.alpha(0.5f)
+    } else {
+        Modifier.settingsItemClickable(onClick = onOpenJoinRoomDialog)
+    }
     val identityItemModifier = if (isInRoom) {
         Modifier.alpha(0.5f)
     } else {
@@ -3914,6 +4141,29 @@ private fun ListenTogetherSettingsSection(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        ListItem(
+            modifier = joinRoomItemModifier,
+            leadingContent = {
+                Icon(
+                    imageVector = Icons.Outlined.MeetingRoom,
+                    contentDescription = stringResource(R.string.listen_together_join_room),
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            headlineContent = { Text(stringResource(R.string.listen_together_join_room)) },
+            supportingContent = {
+                Text(
+                    if (isInRoom) {
+                        stringResource(R.string.settings_listen_together_join_room_disabled)
+                    } else {
+                        stringResource(R.string.settings_listen_together_join_room_desc)
+                    }
+                )
+            },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+        )
+
         ListItem(
             modifier = Modifier.settingsItemClickable(onClick = onOpenServerDialog),
             leadingContent = {

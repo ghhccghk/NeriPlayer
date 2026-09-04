@@ -88,6 +88,9 @@ internal fun searchSettingsEntries(
 }
 
 internal fun AutoSettingInfo.settingsPage(): SettingsPage? {
+    if (keyName in LyricAppearanceSettingKeys) {
+        return SettingsPage.Lyrics
+    }
     if (
         keyName == "netease_auto_source_switch" ||
         keyName == "netease_local_source_fallback"
@@ -149,6 +152,7 @@ internal fun AutoSettingInfo.searchTargetId(): String {
         "nowplaying_cover_blur_darken" -> "nowplaying_cover_blur_background_enabled"
         "lyric_blur_amount" -> "lyric_blur_enabled"
         "standardized_lyric_embedding_enabled" -> "download_metadata_post_processing_enabled"
+        "lyric_font_scale" -> "nowplaying_cover_lyric_font_scale"
         else -> keyName
     }
     return "setting:$targetKey"
@@ -217,6 +221,7 @@ private fun lyricsCardIndex(targetId: String): Int {
         "setting:floating_lyrics_enabled" -> 0
         "setting:cloud_music_lyric_default_offset_ms",
         "setting:qq_music_lyric_default_offset_ms" -> 2
+        in LyricAppearanceSearchTargets -> 3
         else -> 1
     }
 }
@@ -299,8 +304,7 @@ private fun personalizationCardIndex(targetId: String): Int {
         in PersonalizationHomeTargets -> 1
         in PersonalizationPlaybackInfoTargets -> 2
         in PersonalizationPlaybackControlTargets -> 3
-        in PersonalizationLyricsAndDisplayTargets -> 4
-        in PersonalizationBackgroundTargets -> 5
+        in PersonalizationBackgroundTargets -> 4
         else -> 0
     }
 }
@@ -336,14 +340,24 @@ private val PersonalizationPlaybackControlTargets = setOf(
     "setting:lyrics_control_size"
 )
 
-private val PersonalizationLyricsAndDisplayTargets = setOf(
-    "setting:show_lyric_translation",
-    "setting:lyric_translation_use_phonetic",
+private val LyricAppearanceSettingKeys = setOf(
+    "show_lyric_translation",
+    "lyric_translation_use_phonetic",
+    "lyric_font_scale",
+    "nowplaying_cover_lyric_font_scale",
+    "nowplaying_cover_translation_font_scale",
+    "lyrics_page_lyric_font_scale",
+    "lyrics_page_translation_font_scale"
+)
+
+private val LyricAppearanceSearchTargets = setOf(
     "setting:lyric_font_scale",
     "setting:nowplaying_cover_lyric_font_scale",
     "setting:nowplaying_cover_translation_font_scale",
     "setting:lyrics_page_lyric_font_scale",
-    "setting:lyrics_page_translation_font_scale"
+    "setting:lyrics_page_translation_font_scale",
+    "setting:show_lyric_translation",
+    "setting:lyric_translation_use_phonetic"
 )
 
 private val PersonalizationBackgroundTargets = setOf(
@@ -701,6 +715,23 @@ internal fun manualSettingsSearchEntries(context: Context): List<SettingsSearchE
         ),
         entry(
             page = SettingsPage.ListenTogether,
+            titleRes = R.string.listen_together_join_room,
+            descriptionRes = R.string.settings_listen_together_join_room_desc,
+            id = "listen_together_join_room",
+            aliases = listOf(
+                "listen together",
+                "lt",
+                "join",
+                "invite",
+                "room",
+                "link",
+                "jiaru",
+                "yaoqing",
+                "yiqiting"
+            )
+        ),
+        entry(
+            page = SettingsPage.ListenTogether,
             titleRes = R.string.settings_listen_together_server_title,
             descriptionRes = R.string.settings_listen_together_expand,
             id = "listen_together_server",
@@ -771,6 +802,14 @@ private val PageSearchAliases = mapOf(
         "cunchu",
         "huancun"
     ),
+    SettingsPage.StorageCacheDetails to listOf(
+        "storage",
+        "cache",
+        "details",
+        "space",
+        "huancun",
+        "xiangqing"
+    ),
     SettingsPage.TrafficManagement to listOf("traffic", "mobile", "roaming", "data", "liuliang"),
     SettingsPage.Downloads to listOf("download", "downloads", "threads", "parallel", "concurrency", "xiazai"),
     SettingsPage.Backup to listOf("backup", "sync", "github", "webdav", "import", "export", "beifen"),
@@ -794,9 +833,35 @@ private val SettingSearchAliases = mapOf(
     "default_start_destination" to listOf("start page", "home", "tab", "qidongye"),
     "auto_show_keyboard" to listOf("keyboard", "input", "shurufa", "jianpan"),
     "home_card_continue" to listOf("continue", "recent", "jixu"),
-    "home_card_trending" to listOf("trending", "hot", "biao sheng"),
-    "home_card_radar" to listOf("radar", "discover", "siren leidar"),
-    "home_card_recommended" to listOf("recommend", "tuijian"),
+    "home_card_trending" to listOf(
+        "trending",
+        "charts",
+        "hot",
+        "biao sheng",
+        "xin ge",
+        "new song",
+        "guess you like",
+        "猜你喜欢"
+    ),
+    "home_card_radar" to listOf(
+        "radar",
+        "discover",
+        "siren leidar",
+        "fm",
+        "leida gedan",
+        "private",
+        "daily discover",
+        "每日发现"
+    ),
+    "home_card_recommended" to listOf(
+        "recommend",
+        "tuijian",
+        "daily playlist",
+        "high quality",
+        "acg",
+        "more recommendations",
+        "更多推荐"
+    ),
     "show_cover_source_badge" to listOf("badge", "source", "cover", "biaoshi"),
     "always_use_new_tab_style" to listOf("tab", "bottom bar", "new ui"),
     "nowplaying_show_title" to listOf("title", "song name", "geming"),

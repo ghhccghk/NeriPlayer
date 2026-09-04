@@ -2,11 +2,12 @@ package moe.ouom.neriplayer.core.player.download
 
 import moe.ouom.neriplayer.core.api.youtube.YouTubePlayableStreamType
 import moe.ouom.neriplayer.core.download.ManagedDownloadStorage
-import moe.ouom.neriplayer.core.player.resolver.youtube.ChunkRequestIOException
+import moe.ouom.neriplayer.core.player.engine.datasource.ChunkRequestIOException
 import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.util.network.TaggedTestCall
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import okhttp3.Request
@@ -57,6 +58,28 @@ class AudioDownloadManagerTest {
         assertEquals(
             false,
             AudioDownloadManager.shouldFetchRemoteLyricForDownload("[00:00.00]local lyric")
+        )
+    }
+
+    @Test
+    fun `romanized lyric download only piggybacks on an existing lyric request`() {
+        assertFalse(
+            AudioDownloadManager.shouldFetchRomanizedLyricForDownload(
+                shouldFetchPrimaryLyric = false,
+                shouldFetchTranslatedLyric = false
+            )
+        )
+        assertTrue(
+            AudioDownloadManager.shouldFetchRomanizedLyricForDownload(
+                shouldFetchPrimaryLyric = true,
+                shouldFetchTranslatedLyric = false
+            )
+        )
+        assertTrue(
+            AudioDownloadManager.shouldFetchRomanizedLyricForDownload(
+                shouldFetchPrimaryLyric = false,
+                shouldFetchTranslatedLyric = true
+            )
         )
     }
 
@@ -254,43 +277,22 @@ class AudioDownloadManagerTest {
     }
 
     @Test
-    fun `shared cover lookup does not use album key when song has explicit cover url`() {
-        val song = SongItem(
-            id = 1L,
-            name = "Song",
-            artist = "Artist",
-            album = "NeteaseAlbum",
-            albumId = 1L,
-            durationMs = 1_000L,
-            coverUrl = "https://example.com/cover.jpg",
-            originalCoverUrl = "https://example.com/original.jpg"
+    fun `cover sidecar file names include stable song identity`() {
+        val firstCoverName = AudioDownloadManager.buildCoverSidecarFileName(
+            baseName = "Artist - Song",
+            songKey = "1|netease|"
+        )
+        val sameNameSecondCoverName = AudioDownloadManager.buildCoverSidecarFileName(
+            baseName = "Artist - Song",
+            songKey = "2|netease|"
+        )
+        val numberedDuplicateCoverName = AudioDownloadManager.buildCoverSidecarFileName(
+            baseName = "Artist - Song (1)",
+            songKey = "2|netease|"
         )
 
-        assertEquals(
-            listOf(
-                "url:https://example.com/cover.jpg",
-                "url:https://example.com/original.jpg"
-            ),
-            AudioDownloadManager.buildSharedCoverLookupKeys(song)
-        )
-    }
-
-    @Test
-    fun `shared cover lookup keeps album fallback only when cover urls are missing`() {
-        val song = SongItem(
-            id = 1L,
-            name = "Song",
-            artist = "Artist",
-            album = "NeteaseAlbum",
-            albumId = 1L,
-            durationMs = 1_000L,
-            coverUrl = null
-        )
-
-        assertEquals(
-            listOf("album:netease"),
-            AudioDownloadManager.buildSharedCoverLookupKeys(song)
-        )
+        assertNotEquals(firstCoverName, sameNameSecondCoverName)
+        assertNotEquals(firstCoverName, numberedDuplicateCoverName)
     }
 
     @Test

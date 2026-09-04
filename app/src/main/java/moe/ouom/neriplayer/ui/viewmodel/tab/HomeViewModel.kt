@@ -29,35 +29,151 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import moe.ouom.neriplayer.R
+import moe.ouom.neriplayer.core.api.netease.mergeNeteaseSessionCookies
 import moe.ouom.neriplayer.core.api.youtube.YouTubeMusicHomeShelf
 import moe.ouom.neriplayer.core.di.AppContainer
-import moe.ouom.neriplayer.data.auth.common.SavedCookieAuthState
 import moe.ouom.neriplayer.data.auth.youtube.YouTubeAuthBundle
 import moe.ouom.neriplayer.data.auth.youtube.buildRefreshObserverFingerprint
 import moe.ouom.neriplayer.data.model.SongItem
-import moe.ouom.neriplayer.ui.viewmodel.artist.parseNeteaseArtistSummaries
+import moe.ouom.neriplayer.data.platform.netease.neteaseRadarCacheContext
 import moe.ouom.neriplayer.util.platform.LanguageManager
 import moe.ouom.neriplayer.core.logging.NPLogger
-import org.json.JSONObject
 import java.io.IOException
 
 private const val TAG = "NERI-HomeVM"
-private const val HOME_SEARCH_HOT_KEYWORD = "热歌"
-private const val HOME_SEARCH_RADAR_KEYWORD = "私人雷达"
+private const val HOME_NETEASE_SONG_LIMIT = 30
+private const val HOME_NETEASE_PLAYLIST_LIMIT = 30
+private const val HOME_PRIVATE_FM_MAX_BATCHES = 10
 private const val HOME_MAX_FAILURE_BEFORE_WARNING = 3
 private const val HOME_YT_MUSIC_PLAYLIST_LIMIT = 24
 private const val HOME_INITIAL_LOAD_DEFER_MS = 250L
+private const val HOME_SECTION_LOAD_PARALLELISM = 6
+private const val HOME_SECTION_LOAD_PARALLELISM_PER_GROUP = 2
 
-private class ApiCodeException(val code: Int) : IllegalStateException("api_code=$code")
 private fun shouldFallbackRecommend(code: Int): Boolean = code == 301 || code == 50000005
+
+internal fun homeSongFetchAttemptCount(source: NeteaseHomeSongSource): Int {
+    return if (source == NeteaseHomeSongSource.PRIVATE_FM) {
+        1
+    } else {
+        HOME_MAX_FAILURE_BEFORE_WARNING
+    }
+}
+
+internal fun shouldRefreshNeteaseHome(
+    loginChanged: Boolean,
+    recommendationsBootstrapped: Boolean,
+    accountContextChanged: Boolean = false
+): Boolean = loginChanged || accountContextChanged || !recommendationsBootstrapped
+
+internal fun shouldAcceptNeteaseRadarPlaylistLoadResult(
+    requestGeneration: Long,
+    activeGeneration: Long,
+    requestRadarCacheContext: String,
+    activeRadarCacheContext: String
+): Boolean {
+    return requestGeneration == activeGeneration &&
+        requestRadarCacheContext == activeRadarCacheContext
+}
+
+internal fun shouldAcceptYouTubeMusicHomeLoadResult(
+    requestGeneration: Long,
+    activeGeneration: Long,
+    requestAuthFingerprint: String,
+    activeAuthFingerprint: String,
+    internationalizationEnabled: Boolean
+): Boolean {
+    return requestGeneration == activeGeneration &&
+        requestAuthFingerprint == activeAuthFingerprint &&
+        internationalizationEnabled
+}
+
+internal fun shouldScheduleYouTubeMusicHomeRefresh(
+    refreshPending: Boolean,
+    offlineMode: Boolean,
+    requestGeneration: Long,
+    activeGeneration: Long,
+    requestAuthFingerprint: String,
+    activeAuthFingerprint: String,
+    internationalizationEnabled: Boolean
+): Boolean {
+    return refreshPending &&
+        !offlineMode &&
+        shouldAcceptYouTubeMusicHomeLoadResult(
+            requestGeneration = requestGeneration,
+            activeGeneration = activeGeneration,
+            requestAuthFingerprint = requestAuthFingerprint,
+            activeAuthFingerprint = activeAuthFingerprint,
+            internationalizationEnabled = internationalizationEnabled
+        )
+}
+
+internal fun shouldHandleInitialNeteaseHomeCookieEmission(
+    isFirstEmission: Boolean,
+    initialCookies: Map<String, String>,
+    emittedCookies: Map<String, String>
+): Boolean = !isFirstEmission || initialCookies != emittedCookies
+
+internal enum class HomeSectionLoadGroup {
+    PLAYLISTS,
+    TRENDING_SONGS,
+    RADAR_SONGS
+}
+
+/** 让首页三类分区并行加载时保持公平的网络预算和完成顺序 */
+internal class HomeSectionLoadCoordinator(
+    maxConcurrentLoads: Int = HOME_SECTION_LOAD_PARALLELISM,
+    maxConcurrentLoadsPerGroup: Int = HOME_SECTION_LOAD_PARALLELISM_PER_GROUP
+) {
+    private val totalSemaphore = Semaphore(maxConcurrentLoads)
+    private val groupSemaphores = HomeSectionLoadGroup.values().associateWith { group ->
+        Semaphore(maxConcurrentLoadsPerGroup)
+    }
+
+    /** 在来源完成时立即交给状态层，避免慢来源阻塞已完成分区 */
+    suspend fun <S, T> load(
+        group: HomeSectionLoadGroup,
+        sources: List<S>,
+        fetch: suspend (S) -> T,
+        onResult: (T) -> Unit
+    ) {
+        coroutineScope {
+            val pending = sources.map { source ->
+                async {
+                    groupSemaphores.getValue(group).withPermit {
+                        totalSemaphore.withPermit {
+                            fetch(source)
+                        }
+                    }
+                }
+            }.toMutableList()
+            while (pending.isNotEmpty()) {
+                select<Unit> {
+                    pending.forEach { deferred ->
+                        deferred.onAwait { result ->
+                            pending.remove(deferred)
+                            onResult(result)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 data class HomeSectionState<T>(
     val items: List<T> = emptyList(),
@@ -65,10 +181,21 @@ data class HomeSectionState<T>(
     val error: String? = null
 )
 
+data class HomeNeteaseSongSectionState(
+    val source: NeteaseHomeSongSource,
+    val section: HomeSectionState<SongItem> = HomeSectionState()
+)
+
+data class HomeNeteasePlaylistSectionState(
+    val source: NeteaseHomePlaylistSource,
+    val section: HomeSectionState<PlaylistSummary> = HomeSectionState()
+)
+
 data class HomeUiState(
-    val playlists: HomeSectionState<PlaylistSummary> = HomeSectionState(),
-    val hotSongs: HomeSectionState<SongItem> = HomeSectionState(),
-    val radarSongs: HomeSectionState<SongItem> = HomeSectionState(),
+    val playlistSections: List<HomeNeteasePlaylistSectionState> = emptyList(),
+    val trendingSongSections: List<HomeNeteaseSongSectionState> = emptyList(),
+    val radarSongSections: List<HomeNeteaseSongSectionState> = emptyList(),
+    val radarPlaylists: HomeSectionState<PlaylistSummary> = HomeSectionState(),
     val ytMusicPlaylists: HomeSectionState<YouTubeMusicPlaylist> = HomeSectionState(),
     val ytMusicHomeShelves: HomeSectionState<YouTubeMusicHomeShelf> = HomeSectionState(),
     val hasLogin: Boolean = false,
@@ -81,36 +208,134 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val client = AppContainer.neteaseClient
     private val youtubeAuthRepo = AppContainer.youtubeAuthRepo
 
-    private val _uiState = MutableStateFlow(
-        HomeUiState(
-            playlists = HomeSectionState(loading = true),
-            hotSongs = HomeSectionState(loading = true),
-            radarSongs = HomeSectionState(loading = true)
-        )
-    )
+    private val initialRecommendCookies = repo.withCurrentCookies { cookies ->
+        client.setPersistedCookies(cookies)
+        cookies
+    }
+    private var hasRecommendLogin = !initialRecommendCookies["MUSIC_U"].isNullOrBlank()
+    private val _uiState = MutableStateFlow(createHomeUiState(hasRecommendLogin, loading = true))
     val uiState: StateFlow<HomeUiState> = _uiState
 
     private var playlistJob: Job? = null
     private var hotSongsJob: Job? = null
     private var radarSongsJob: Job? = null
-    private var ytMusicPlaylistJob: Job? = null
-    private var ytMusicHomeFeedJob: Job? = null
-    private var ytMusicPlaylistRefreshPending = false
-    private var ytMusicHomeFeedRefreshPending = false
-    private var hasRecommendLogin = false
+    private val homeSectionLoadCoordinator = HomeSectionLoadCoordinator()
+    private var radarPlaylistsJob: Job? = null
+    private var ytMusicHomeJob: Job? = null
+    private var ytMusicHomeRefreshPending = false
+    private var ytMusicHomeLoadGeneration: Long = 0L
     private var homeRecommendationsBootstrapped = false
     private var lastYouTubeAuthFingerprint: String? = null
+    private var lastNeteaseRadarCacheContext = neteaseRadarCacheContext(repo.getCookiesOnce())
+    private var radarPlaylistLoadGeneration: Long = 0L
     private var offlineMode = false
 
     private fun localizedAppContext() = LanguageManager.applyLanguage(getApplication())
 
-    init {
-        val initialCookies = repo.getCookiesOnce().toMutableMap().apply {
-            putIfAbsent("os", "pc")
+    private fun createHomeUiState(hasLogin: Boolean, loading: Boolean): HomeUiState {
+        return HomeUiState(
+            playlistSections = createPlaylistSections(hasLogin, loading),
+            trendingSongSections = createSongSections(
+                sources = NeteaseHomeTrendingSongSources,
+                hasLogin = hasLogin,
+                loading = loading
+            ),
+            radarSongSections = createSongSections(
+                sources = NeteaseHomeRadarSongSources,
+                hasLogin = hasLogin,
+                loading = loading
+            ),
+            radarPlaylists = HomeSectionState(loading = loading),
+            hasLogin = hasLogin
+        )
+    }
+
+    private fun createSongSections(
+        sources: List<NeteaseHomeSongSource>,
+        hasLogin: Boolean,
+        loading: Boolean
+    ): List<HomeNeteaseSongSectionState> {
+        return availableNeteaseHomeSongSources(sources, hasLogin).map { source ->
+            HomeNeteaseSongSectionState(source = source, section = HomeSectionState(loading = loading))
         }
-        hasRecommendLogin = !initialCookies["MUSIC_U"].isNullOrBlank()
+    }
+
+    private fun createPlaylistSections(
+        hasLogin: Boolean,
+        loading: Boolean
+    ): List<HomeNeteasePlaylistSectionState> {
+        return availableNeteaseHomePlaylistSources(NeteaseHomePlaylistSources, hasLogin).map { source ->
+            HomeNeteasePlaylistSectionState(
+                source = source,
+                section = HomeSectionState(loading = loading)
+            )
+        }
+    }
+
+    private fun buildSongSectionsForRefresh(
+        current: List<HomeNeteaseSongSectionState>,
+        sources: List<NeteaseHomeSongSource>
+    ): List<HomeNeteaseSongSectionState> {
+        val previousBySource = current.associateBy { it.source }
+        return availableNeteaseHomeSongSources(sources, hasRecommendLogin).map { source ->
+            val previous = previousBySource[source]?.section ?: HomeSectionState()
+            HomeNeteaseSongSectionState(
+                source = source,
+                section = previous.copy(loading = true, error = null)
+            )
+        }
+    }
+
+    private fun buildPlaylistSectionsForRefresh(
+        current: List<HomeNeteasePlaylistSectionState>
+    ): List<HomeNeteasePlaylistSectionState> {
+        val previousBySource = current.associateBy { it.source }
+        return availableNeteaseHomePlaylistSources(NeteaseHomePlaylistSources, hasRecommendLogin)
+            .map { source ->
+                val previous = previousBySource[source]?.section ?: HomeSectionState()
+                HomeNeteasePlaylistSectionState(
+                    source = source,
+                    section = previous.copy(loading = true, error = null)
+                )
+            }
+    }
+
+    private fun clearSongSectionLoading(
+        sections: List<HomeNeteaseSongSectionState>
+    ): List<HomeNeteaseSongSectionState> {
+        return sections.map { sectionState ->
+            sectionState.copy(section = sectionState.section.copy(loading = false, error = null))
+        }
+    }
+
+    private fun clearPlaylistSectionLoading(
+        sections: List<HomeNeteasePlaylistSectionState>
+    ): List<HomeNeteasePlaylistSectionState> {
+        return sections.map { sectionState ->
+            sectionState.copy(section = sectionState.section.copy(loading = false, error = null))
+        }
+    }
+
+    private fun replaceSongSection(
+        sections: List<HomeNeteaseSongSectionState>,
+        updated: HomeNeteaseSongSectionState
+    ): List<HomeNeteaseSongSectionState> {
+        return sections.map { sectionState ->
+            if (sectionState.source == updated.source) updated else sectionState
+        }
+    }
+
+    private fun replacePlaylistSection(
+        sections: List<HomeNeteasePlaylistSectionState>,
+        updated: HomeNeteasePlaylistSectionState
+    ): List<HomeNeteasePlaylistSectionState> {
+        return sections.map { sectionState ->
+            if (sectionState.source == updated.source) updated else sectionState
+        }
+    }
+
+    init {
         lastYouTubeAuthFingerprint = buildYouTubeAuthFingerprint(youtubeAuthRepo.getAuthOnce())
-        _uiState.value = _uiState.value.copy(hasLogin = hasRecommendLogin)
 
         // 观察国际化设置变化, 切换推荐源
         viewModelScope.launch {
@@ -129,8 +354,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     internationalizationEnabled = useYouTubeHome
                 )
                 if (useYouTubeHome) {
-                    refreshYtMusicPlaylists()
-                    refreshYtMusicHomeFeed()
+                    refreshYtMusicHome()
                 } else {
                     cancelYouTubeHomeJobs()
                     _uiState.value = _uiState.value.copy(
@@ -155,6 +379,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 if (!_uiState.value.internationalizationEnabled) {
                     return@collect
                 }
+                cancelYouTubeHomeJobs()
                 if (!bundle.hasYouTubeMusicCookieContext()) {
                     NPLogger.d(TAG, "youtube auth cleared, reset home YouTube sections")
                     _uiState.value = _uiState.value.copy(
@@ -163,36 +388,60 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     return@collect
                 }
-                refreshYtMusicPlaylists()
-                refreshYtMusicHomeFeed()
+                refreshYtMusicHome()
             }
         }
 
         // 登录后自动刷新首页推荐歌单
         viewModelScope.launch {
-            repo.cookieFlow.drop(1).collect { raw ->
-                val cookies = raw.toMutableMap()
-                if (!cookies.containsKey("os")) cookies["os"] = "pc"
-                NPLogger.d(TAG, "cookieFlow updated: keys=${cookies.keys.joinToString()}")
-                val nextHasLogin = !cookies["MUSIC_U"].isNullOrBlank()
+            var isFirstCookieEmission = true
+            repo.cookieFlow.collect { raw ->
+                if (!repo.withCurrentCookiesIfMatches(raw) { currentCookies ->
+                        client.setPersistedCookies(currentCookies)
+                    }
+                ) {
+                    return@collect
+                }
+                val shouldHandleEmission = shouldHandleInitialNeteaseHomeCookieEmission(
+                    isFirstEmission = isFirstCookieEmission,
+                    initialCookies = initialRecommendCookies,
+                    emittedCookies = raw
+                )
+                isFirstCookieEmission = false
+                if (!shouldHandleEmission) return@collect
+                NPLogger.d(TAG, "cookieFlow updated: keys=${raw.keys.joinToString()}")
+                val nextHasLogin = !raw["MUSIC_U"].isNullOrBlank()
+                val nextRadarCacheContext = neteaseRadarCacheContext(raw)
+                val accountContextChanged =
+                    lastNeteaseRadarCacheContext != nextRadarCacheContext
+                lastNeteaseRadarCacheContext = nextRadarCacheContext
                 val loginChanged = hasRecommendLogin != nextHasLogin
                 hasRecommendLogin = nextHasLogin
                 if (loginChanged) {
                     _uiState.value = _uiState.value.copy(hasLogin = nextHasLogin)
-                    refreshRecommend()
                 }
-                if (!homeRecommendationsBootstrapped) {
+                if (accountContextChanged) {
+                    _uiState.update { state ->
+                        state.copy(radarPlaylists = HomeSectionState())
+                    }
+                }
+                if (
+                    shouldRefreshNeteaseHome(
+                        loginChanged = loginChanged,
+                        recommendationsBootstrapped = homeRecommendationsBootstrapped,
+                        accountContextChanged = accountContextChanged
+                    )
+                ) {
                     homeRecommendationsBootstrapped = true
-                    loadHomeRecommendations(force = true)
+                    refreshNeteaseHome()
                 }
             }
         }
         viewModelScope.launch {
             delay(HOME_INITIAL_LOAD_DEFER_MS)
-            refreshRecommend()
             if (!homeRecommendationsBootstrapped) {
                 homeRecommendationsBootstrapped = true
-                loadHomeRecommendations(force = true)
+                refreshNeteaseHome()
             }
         }
     }
@@ -205,75 +454,72 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (!enabled) return
 
         cancelHomeNetworkJobs()
-        _uiState.value = _uiState.value.copy(
-            playlists = _uiState.value.playlists.copy(loading = false, error = null),
-            hotSongs = _uiState.value.hotSongs.copy(loading = false, error = null),
-            radarSongs = _uiState.value.radarSongs.copy(loading = false, error = null),
-            ytMusicPlaylists = _uiState.value.ytMusicPlaylists.copy(loading = false, error = null),
-            ytMusicHomeShelves = _uiState.value.ytMusicHomeShelves.copy(loading = false, error = null)
-        )
+        _uiState.update { state ->
+            state.copy(
+                playlistSections = clearPlaylistSectionLoading(state.playlistSections),
+                trendingSongSections = clearSongSectionLoading(state.trendingSongSections),
+                radarSongSections = clearSongSectionLoading(state.radarSongSections),
+                radarPlaylists = state.radarPlaylists.copy(loading = false, error = null),
+                ytMusicPlaylists = state.ytMusicPlaylists.copy(loading = false, error = null),
+                ytMusicHomeShelves = state.ytMusicHomeShelves.copy(loading = false, error = null)
+            )
+        }
     }
 
     private fun cancelHomeNetworkJobs() {
         playlistJob?.cancel()
         hotSongsJob?.cancel()
         radarSongsJob?.cancel()
-        ytMusicPlaylistJob?.cancel()
-        ytMusicHomeFeedJob?.cancel()
-        ytMusicPlaylistRefreshPending = false
-        ytMusicHomeFeedRefreshPending = false
+        radarPlaylistsJob?.cancel()
+        cancelYouTubeHomeJobs()
     }
 
     private fun cancelYouTubeHomeJobs() {
-        ytMusicPlaylistJob?.cancel()
-        ytMusicHomeFeedJob?.cancel()
-        ytMusicPlaylistJob = null
-        ytMusicHomeFeedJob = null
-        ytMusicPlaylistRefreshPending = false
-        ytMusicHomeFeedRefreshPending = false
+        ytMusicHomeLoadGeneration += 1L
+        ytMusicHomeJob?.cancel()
+        ytMusicHomeJob = null
+        ytMusicHomeRefreshPending = false
+    }
+
+    fun refreshNeteaseHome() {
+        if (offlineMode) return
+
+        refreshRecommend()
+        loadHomeRecommendations(force = true)
+        refreshRadarPlaylists()
     }
 
     /** 拉首页推荐歌单 */
     fun refreshRecommend() {
         if (offlineMode) return
 
-        NPLogger.d(TAG, "refreshRecommend start: hasLogin=$hasRecommendLogin")
-        playlistJob?.cancel()
-        val previous = _uiState.value.playlists
-        _uiState.value = _uiState.value.copy(
-            playlists = previous.copy(loading = true, error = null)
+        val sources = availableNeteaseHomePlaylistSources(
+            candidates = NeteaseHomePlaylistSources,
+            hasLogin = hasRecommendLogin
         )
+        if (sources.isEmpty()) {
+            _uiState.update { state -> state.copy(playlistSections = emptyList()) }
+            return
+        }
+        NPLogger.d(TAG, "refreshRecommend start: sources=$sources, hasLogin=$hasRecommendLogin")
+        playlistJob?.cancel()
+        _uiState.update { state ->
+            state.copy(
+                playlistSections = buildPlaylistSectionsForRefresh(state.playlistSections),
+                hasLogin = hasRecommendLogin
+            )
+        }
         playlistJob = viewModelScope.launch {
-            when (val result = fetchWithRetry("refreshRecommend") {
-                val raw = withContext(Dispatchers.IO) {
-                    client.getRecommendedPlaylists(limit = 30, usePersistedCookies = hasRecommendLogin)
-                }
-                try {
-                    parseRecommendOnWorker(raw)
-                } catch (e: ApiCodeException) {
-                    if (hasRecommendLogin && shouldFallbackRecommend(e.code)) {
-                        NPLogger.w(TAG, "refreshRecommend fallback to anonymous due to api_code=${e.code}")
-                        val fallbackRaw = withContext(Dispatchers.IO) {
-                            client.getRecommendedPlaylists(limit = 30, usePersistedCookies = false)
-                        }
-                        parseRecommendOnWorker(fallbackRaw)
-                    } else {
-                        throw e
-                    }
-                }
-            }) {
-                is RetryLoadResult.Success -> {
-                    NPLogger.d(TAG, "refreshRecommend success: count=${result.items.size}")
-                    _uiState.value = _uiState.value.copy(
-                        playlists = HomeSectionState(items = result.items)
-                    )
-                }
-                is RetryLoadResult.Failure -> {
-                    NPLogger.e(TAG, "refreshRecommend failed", result.throwable)
-                    _uiState.value = _uiState.value.copy(
-                        playlists = _uiState.value.playlists.copy(
-                            loading = false,
-                            error = buildHomeErrorMessage(result.throwable)
+            homeSectionLoadCoordinator.load(
+                group = HomeSectionLoadGroup.PLAYLISTS,
+                sources = sources,
+                fetch = ::fetchPlaylistSection
+            ) { section ->
+                _uiState.update { state ->
+                    state.copy(
+                        playlistSections = replacePlaylistSection(
+                            state.playlistSections,
+                            section
                         )
                     )
                 }
@@ -281,66 +527,56 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * 首页歌曲推荐:
-     * - 热门热曲: 使用关键词"热歌"搜索 30 首
-     * - 私人雷达: 使用关键词"私人雷达"搜索 30 首
-     */
     fun loadHomeRecommendations(force: Boolean = false) {
         if (offlineMode) return
 
         val state = _uiState.value
         if (!force) {
-            val alreadyLoaded =
-                state.hotSongs.items.isNotEmpty() && state.radarSongs.items.isNotEmpty()
-            val loading = state.hotSongs.loading || state.radarSongs.loading
+            val songSections = state.radarSongSections + state.trendingSongSections
+            val alreadyLoaded = songSections.isNotEmpty() &&
+                songSections.all { it.section.items.isNotEmpty() || it.section.error != null }
+            val loading = songSections.any { it.section.loading }
             if (alreadyLoaded || loading) return
         }
 
-        refreshHotSongs()
         refreshRadarSongs()
+        refreshHotSongs()
     }
 
+    /** 刷新首页热门歌曲板块，保留各来源独立的加载和错误状态 */
     private fun refreshHotSongs() {
         if (offlineMode) return
-        if (repo.getAuthHealthOnce().state == SavedCookieAuthState.Missing) {
-            _uiState.value = _uiState.value.copy(
-                hotSongs = HomeSectionState(loading = false)
-            )
+
+        val sources = availableNeteaseHomeSongSources(
+            candidates = NeteaseHomeTrendingSongSources,
+            hasLogin = hasRecommendLogin
+        )
+        if (sources.isEmpty()) {
+            _uiState.update { state -> state.copy(trendingSongSections = emptyList()) }
             return
         }
-
-        NPLogger.d(TAG, "refreshHotSongs start")
+        NPLogger.d(TAG, "refreshHotSongs start: sources=$sources")
         hotSongsJob?.cancel()
-        val previous = _uiState.value.hotSongs
-        _uiState.value = _uiState.value.copy(
-            hotSongs = previous.copy(loading = true, error = null)
-        )
+        _uiState.update { state ->
+            state.copy(
+                trendingSongSections = buildSongSectionsForRefresh(
+                    current = state.trendingSongSections,
+                    sources = NeteaseHomeTrendingSongSources
+                ),
+                hasLogin = hasRecommendLogin
+            )
+        }
         hotSongsJob = viewModelScope.launch {
-            when (val result = fetchWithRetry("refreshHotSongs") {
-                val raw = withContext(Dispatchers.IO) {
-                    client.searchSongs(
-                        keyword = HOME_SEARCH_HOT_KEYWORD,
-                        limit = 30,
-                        offset = 0,
-                        type = 1,
-                        usePersistedCookies = false
-                    )
-                }
-                parseSongsOnWorker(raw)
-            }) {
-                is RetryLoadResult.Success -> {
-                    NPLogger.d(TAG, "refreshHotSongs success: count=${result.items.size}")
-                    _uiState.value = _uiState.value.copy(
-                        hotSongs = HomeSectionState(items = result.items)
-                    )
-                }
-                is RetryLoadResult.Failure -> {
-                    NPLogger.e(TAG, "refreshHotSongs failed", result.throwable)
-                    _uiState.value = _uiState.value.copy(
-                        hotSongs = _uiState.value.hotSongs.copy(
-                            loading = false,
-                            error = buildHomeErrorMessage(result.throwable)
+            homeSectionLoadCoordinator.load(
+                group = HomeSectionLoadGroup.TRENDING_SONGS,
+                sources = sources,
+                fetch = { source -> fetchSongSection("refreshHotSongs", source) }
+            ) { section ->
+                _uiState.update { state ->
+                    state.copy(
+                        trendingSongSections = replaceSongSection(
+                            state.trendingSongSections,
+                            section
                         )
                     )
                 }
@@ -348,46 +584,80 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** 刷新首页雷达歌曲板块，保留各来源独立的加载和错误状态 */
     private fun refreshRadarSongs() {
         if (offlineMode) return
-        if (repo.getAuthHealthOnce().state == SavedCookieAuthState.Missing) {
-            _uiState.value = _uiState.value.copy(
-                radarSongs = HomeSectionState(loading = false)
-            )
+
+        val sources = availableNeteaseHomeSongSources(
+            candidates = NeteaseHomeRadarSongSources,
+            hasLogin = hasRecommendLogin
+        )
+        if (sources.isEmpty()) {
+            _uiState.update { state -> state.copy(radarSongSections = emptyList()) }
             return
         }
-
-        NPLogger.d(TAG, "refreshRadarSongs start")
+        NPLogger.d(TAG, "refreshRadarSongs start: sources=$sources")
         radarSongsJob?.cancel()
-        val previous = _uiState.value.radarSongs
-        _uiState.value = _uiState.value.copy(
-            radarSongs = previous.copy(loading = true, error = null)
-        )
+        _uiState.update { state ->
+            state.copy(
+                radarSongSections = buildSongSectionsForRefresh(
+                    current = state.radarSongSections,
+                    sources = NeteaseHomeRadarSongSources
+                ),
+                hasLogin = hasRecommendLogin
+            )
+        }
         radarSongsJob = viewModelScope.launch {
-            when (val result = fetchWithRetry("refreshRadarSongs") {
-                val raw = withContext(Dispatchers.IO) {
-                    client.searchSongs(
-                        keyword = HOME_SEARCH_RADAR_KEYWORD,
-                        limit = 30,
-                        offset = 0,
-                        type = 1,
-                        usePersistedCookies = false
+            homeSectionLoadCoordinator.load(
+                group = HomeSectionLoadGroup.RADAR_SONGS,
+                sources = sources,
+                fetch = { source -> fetchSongSection("refreshRadarSongs", source) }
+            ) { section ->
+                _uiState.update { state ->
+                    state.copy(
+                        radarSongSections = replaceSongSection(
+                            state.radarSongSections,
+                            section
+                        )
                     )
                 }
-                parseSongsOnWorker(raw)
+            }
+        }
+    }
+
+    private fun refreshRadarPlaylists() {
+        if (offlineMode) return
+
+        NPLogger.d(TAG, "refreshRadarPlaylists start")
+        radarPlaylistsJob?.cancel()
+        radarPlaylistLoadGeneration += 1L
+        val loadGeneration = radarPlaylistLoadGeneration
+        val requestRadarCacheContext = lastNeteaseRadarCacheContext
+        val previous = _uiState.value.radarPlaylists
+        _uiState.value = _uiState.value.copy(
+            radarPlaylists = previous.copy(loading = true, error = null)
+        )
+        radarPlaylistsJob = viewModelScope.launch {
+            when (val result = fetchWithRetry("refreshRadarPlaylists") {
+                loadRadarPlaylistSummaries(requestRadarCacheContext)
             }) {
                 is RetryLoadResult.Success -> {
-                    NPLogger.d(TAG, "refreshRadarSongs success: count=${result.items.size}")
+                    if (!isCurrentRadarPlaylistLoad(loadGeneration, requestRadarCacheContext)) {
+                        return@launch
+                    }
+                    NPLogger.d(TAG, "refreshRadarPlaylists success: count=${result.items.size}")
                     _uiState.value = _uiState.value.copy(
-                        radarSongs = HomeSectionState(items = result.items)
+                        radarPlaylists = HomeSectionState(items = result.items)
                     )
                 }
                 is RetryLoadResult.Failure -> {
-                    NPLogger.e(TAG, "refreshRadarSongs failed", result.throwable)
+                    if (!isCurrentRadarPlaylistLoad(loadGeneration, requestRadarCacheContext)) {
+                        return@launch
+                    }
+                    NPLogger.e(TAG, "refreshRadarPlaylists failed", result.throwable)
                     _uiState.value = _uiState.value.copy(
-                        radarSongs = _uiState.value.radarSongs.copy(
-                            loading = false,
-                            error = buildHomeErrorMessage(result.throwable)
+                        radarPlaylists = HomeSectionState(
+                            items = NeteaseRadarPlaylistDefinitions.map { it.toPlaylistSummary() }
                         )
                     )
                 }
@@ -395,134 +665,163 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 拉取 YouTube Music 歌单 */
+    private fun isCurrentRadarPlaylistLoad(
+        loadGeneration: Long,
+        requestRadarCacheContext: String
+    ): Boolean {
+        return shouldAcceptNeteaseRadarPlaylistLoadResult(
+            requestGeneration = loadGeneration,
+            activeGeneration = radarPlaylistLoadGeneration,
+            requestRadarCacheContext = requestRadarCacheContext,
+            activeRadarCacheContext = neteaseRadarCacheContext(repo.getCookiesOnce())
+        )
+    }
+
+    /** 拉取一次 YouTube Music 首页快照并同时更新歌单和推荐栏 */
+    fun refreshYtMusicHome() {
+        requestYtMusicHomeRefresh(queueIfLoading = true)
+    }
+
+    /** 兼容旧调用，复用正在加载的首页快照 */
     fun refreshYtMusicPlaylists() {
+        requestYtMusicHomeRefresh(queueIfLoading = false)
+    }
+
+    /** 兼容旧调用，复用正在加载的首页快照 */
+    fun refreshYtMusicHomeFeed() {
+        requestYtMusicHomeRefresh(queueIfLoading = false)
+    }
+
+    private fun requestYtMusicHomeRefresh(queueIfLoading: Boolean) {
         if (offlineMode || !_uiState.value.internationalizationEnabled) return
 
-        if (ytMusicPlaylistJob?.isActive == true) {
-            ytMusicPlaylistRefreshPending = true
-            NPLogger.d(TAG, "refreshYtMusicPlaylists coalesced while loading")
+        if (ytMusicHomeJob?.isActive == true) {
+            if (queueIfLoading) {
+                ytMusicHomeRefreshPending = true
+                NPLogger.d(TAG, "refreshYtMusicHome coalesced while loading")
+            } else {
+                NPLogger.d(TAG, "refreshYtMusicHome reused while loading")
+            }
             return
         }
-        ytMusicPlaylistRefreshPending = false
-        NPLogger.d(TAG, "refreshYtMusicPlaylists start")
-        _uiState.value = _uiState.value.copy(
-            ytMusicPlaylists = _uiState.value.ytMusicPlaylists.copy(loading = true, error = null)
-        )
-        ytMusicPlaylistJob = viewModelScope.launch {
+        ytMusicHomeRefreshPending = false
+        val requestGeneration = ++ytMusicHomeLoadGeneration
+        val requestAuthFingerprint = buildYouTubeAuthFingerprint(youtubeAuthRepo.getAuthOnce())
+        NPLogger.d(TAG, "refreshYtMusicHome start")
+        _uiState.update { state ->
+            state.copy(
+                ytMusicPlaylists = state.ytMusicPlaylists.copy(loading = true, error = null),
+                ytMusicHomeShelves = state.ytMusicHomeShelves.copy(loading = true, error = null)
+            )
+        }
+        ytMusicHomeJob = viewModelScope.launch {
             try {
-                when (val result = fetchWithRetry("refreshYtMusicPlaylists") {
-                    val library = withContext(Dispatchers.IO) {
-                        AppContainer.youtubeMusicClient.getHomePlaylistRecommendations()
-                    }
-                    library.map { pl ->
-                        YouTubeMusicPlaylist(
-                            browseId = pl.browseId,
-                            playlistId = pl.playlistId,
-                            title = pl.title,
-                            subtitle = pl.subtitle,
-                            coverUrl = pl.coverUrl,
-                            trackCount = pl.trackCount ?: 0
-                        )
-                    }.take(HOME_YT_MUSIC_PLAYLIST_LIMIT)
+                when (val result = fetchWithRetry("refreshYtMusicHome") {
+                    listOf(
+                        withContext(Dispatchers.IO) {
+                            loadYouTubeMusicHomeSnapshot(
+                                playlistLimit = HOME_YT_MUSIC_PLAYLIST_LIMIT,
+                                loadShelves = {
+                                    AppContainer.youtubeMusicClient.getHomeFeed(
+                                        fillShelfContinuations = false,
+                                        requireLogin = true
+                                    )
+                                }
+                            )
+                        }
+                    )
                 }) {
                     is RetryLoadResult.Success -> {
-                        NPLogger.d(TAG, "refreshYtMusicPlaylists success: count=${result.items.size}")
-                        _uiState.value = _uiState.value.copy(
-                            ytMusicPlaylists = HomeSectionState(items = result.items)
+                        if (!isCurrentYouTubeMusicHomeLoad(
+                                requestGeneration = requestGeneration,
+                                requestAuthFingerprint = requestAuthFingerprint
+                            )
+                        ) {
+                            NPLogger.d(TAG, "refreshYtMusicHome discarded stale result")
+                            return@launch
+                        }
+                        val snapshot = result.items.single()
+                        NPLogger.d(
+                            TAG,
+                            "refreshYtMusicHome success: shelves=${snapshot.shelves.size}, playlists=${snapshot.playlists.size}"
                         )
+                        _uiState.update { state ->
+                            state.copy(
+                                ytMusicPlaylists = HomeSectionState(items = snapshot.playlists),
+                                ytMusicHomeShelves = HomeSectionState(items = snapshot.shelves)
+                            )
+                        }
                     }
                     is RetryLoadResult.Failure -> {
-                        NPLogger.e(TAG, "refreshYtMusicPlaylists failed", result.throwable)
-                        _uiState.value = _uiState.value.copy(
-                            ytMusicPlaylists = _uiState.value.ytMusicPlaylists.copy(
-                                loading = false,
-                                error = buildHomeErrorMessage(result.throwable)
+                        if (!isCurrentYouTubeMusicHomeLoad(
+                                requestGeneration = requestGeneration,
+                                requestAuthFingerprint = requestAuthFingerprint
                             )
-                        )
+                        ) {
+                            NPLogger.d(TAG, "refreshYtMusicHome discarded stale failure")
+                            return@launch
+                        }
+                        NPLogger.e(TAG, "refreshYtMusicHome failed", result.throwable)
+                        val error = buildHomeErrorMessage(result.throwable)
+                        _uiState.update { state ->
+                            state.copy(
+                                ytMusicPlaylists = state.ytMusicPlaylists.copy(
+                                    loading = false,
+                                    error = error
+                                ),
+                                ytMusicHomeShelves = state.ytMusicHomeShelves.copy(
+                                    loading = false,
+                                    error = error
+                                )
+                            )
+                        }
                     }
                 }
             } finally {
                 val completedJob = coroutineContext[Job]
-                if (ytMusicPlaylistJob === completedJob) {
-                    ytMusicPlaylistJob = null
-                    if (
-                        ytMusicPlaylistRefreshPending &&
-                        !offlineMode &&
-                        _uiState.value.internationalizationEnabled
-                    ) {
-                        ytMusicPlaylistRefreshPending = false
-                        refreshYtMusicPlaylists()
+                if (ytMusicHomeJob === completedJob) {
+                    ytMusicHomeJob = null
+                    val shouldRefreshPendingLoad = shouldScheduleYouTubeMusicHomeRefresh(
+                        refreshPending = ytMusicHomeRefreshPending,
+                        offlineMode = offlineMode,
+                        requestGeneration = requestGeneration,
+                        activeGeneration = ytMusicHomeLoadGeneration,
+                        requestAuthFingerprint = requestAuthFingerprint,
+                        activeAuthFingerprint = buildYouTubeAuthFingerprint(
+                            youtubeAuthRepo.getAuthOnce()
+                        ),
+                        internationalizationEnabled = _uiState.value.internationalizationEnabled
+                    )
+                    ytMusicHomeRefreshPending = false
+                    if (shouldRefreshPendingLoad) {
+                        refreshYtMusicHome()
                     }
                 }
             }
         }
     }
 
-
-    /** 拉取 YouTube Music 首页推荐 */
-    fun refreshYtMusicHomeFeed() {
-        if (offlineMode || !_uiState.value.internationalizationEnabled) return
-
-        if (ytMusicHomeFeedJob?.isActive == true) {
-            ytMusicHomeFeedRefreshPending = true
-            NPLogger.d(TAG, "refreshYtMusicHomeFeed coalesced while loading")
-            return
-        }
-        ytMusicHomeFeedRefreshPending = false
-        NPLogger.d(TAG, "refreshYtMusicHomeFeed start")
-        _uiState.value = _uiState.value.copy(
-            ytMusicHomeShelves = _uiState.value.ytMusicHomeShelves.copy(loading = true, error = null)
+    private fun isCurrentYouTubeMusicHomeLoad(
+        requestGeneration: Long,
+        requestAuthFingerprint: String
+    ): Boolean {
+        return shouldAcceptYouTubeMusicHomeLoadResult(
+            requestGeneration = requestGeneration,
+            activeGeneration = ytMusicHomeLoadGeneration,
+            requestAuthFingerprint = requestAuthFingerprint,
+            activeAuthFingerprint = buildYouTubeAuthFingerprint(youtubeAuthRepo.getAuthOnce()),
+            internationalizationEnabled = _uiState.value.internationalizationEnabled
         )
-        ytMusicHomeFeedJob = viewModelScope.launch {
-            try {
-                when (val result = fetchWithRetry("refreshYtMusicHomeFeed") {
-                    withContext(Dispatchers.IO) {
-                        AppContainer.youtubeMusicClient.getHomeFeed(
-                            fillShelfContinuations = false,
-                            requireLogin = true
-                        )
-                    }
-                }) {
-                    is RetryLoadResult.Success -> {
-                        NPLogger.d(TAG, "refreshYtMusicHomeFeed success: count=${result.items.size}")
-                        _uiState.value = _uiState.value.copy(
-                            ytMusicHomeShelves = HomeSectionState(items = result.items)
-                        )
-                    }
-                    is RetryLoadResult.Failure -> {
-                        NPLogger.e(TAG, "refreshYtMusicHomeFeed failed", result.throwable)
-                        _uiState.value = _uiState.value.copy(
-                            ytMusicHomeShelves = _uiState.value.ytMusicHomeShelves.copy(
-                                loading = false,
-                                error = buildHomeErrorMessage(result.throwable)
-                            )
-                        )
-                    }
-                }
-            } finally {
-                val completedJob = coroutineContext[Job]
-                if (ytMusicHomeFeedJob === completedJob) {
-                    ytMusicHomeFeedJob = null
-                    if (
-                        ytMusicHomeFeedRefreshPending &&
-                        !offlineMode &&
-                        _uiState.value.internationalizationEnabled
-                    ) {
-                        ytMusicHomeFeedRefreshPending = false
-                        refreshYtMusicHomeFeed()
-                    }
-                }
-            }
-        }
     }
 
     private suspend fun <T> fetchWithRetry(
         name: String,
+        maxAttempts: Int = HOME_MAX_FAILURE_BEFORE_WARNING,
         fetch: suspend () -> List<T>
     ): RetryLoadResult<T> {
+        require(maxAttempts > 0) { "maxAttempts must be positive" }
         var lastError: Throwable? = null
-        repeat(HOME_MAX_FAILURE_BEFORE_WARNING) { attempt ->
+        repeat(maxAttempts) { attempt ->
             try {
                 val items = fetch()
                 if (attempt > 0) {
@@ -537,7 +836,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 lastError = e
                 NPLogger.w(
                     TAG,
-                    "$name attempt ${attempt + 1}/$HOME_MAX_FAILURE_BEFORE_WARNING failed: ${e.message}"
+                    "$name attempt ${attempt + 1}/$maxAttempts failed: ${e.message}"
                 )
             }
         }
@@ -567,13 +866,245 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun parseRecommendOnWorker(raw: String): List<PlaylistSummary> =
         withContext(Dispatchers.Default) {
-            parseRecommend(raw)
+            parseNeteaseHomePlaylists(raw, limit = HOME_NETEASE_PLAYLIST_LIMIT)
         }
 
     private suspend fun parseSongsOnWorker(raw: String): List<SongItem> =
         withContext(Dispatchers.Default) {
-            parseSongs(raw)
+            parseNeteaseHomeSongs(raw, limit = HOME_NETEASE_SONG_LIMIT)
         }
+
+    private suspend fun fetchSongSection(
+        name: String,
+        source: NeteaseHomeSongSource
+    ): HomeNeteaseSongSectionState {
+        return when (
+            val result = fetchWithRetry(
+                name = "$name/$source",
+                maxAttempts = homeSongFetchAttemptCount(source)
+            ) {
+                fetchSongSource(source)
+            }
+        ) {
+            is RetryLoadResult.Success -> {
+                NPLogger.d(
+                    TAG,
+                    "$name success: source=$source, count=${result.items.size}"
+                )
+                HomeNeteaseSongSectionState(
+                    source = source,
+                    section = HomeSectionState(items = result.items)
+                )
+            }
+            is RetryLoadResult.Failure -> {
+                NPLogger.e(TAG, "$name failed: source=$source", result.throwable)
+                HomeNeteaseSongSectionState(
+                    source = source,
+                    section = HomeSectionState(error = buildHomeErrorMessage(result.throwable))
+                )
+            }
+        }
+    }
+
+    private suspend fun fetchPlaylistSection(
+        source: NeteaseHomePlaylistSource
+    ): HomeNeteasePlaylistSectionState {
+        return when (val result = fetchWithRetry("refreshRecommend/$source") {
+            try {
+                fetchPlaylistSource(source)
+            } catch (e: ApiCodeException) {
+                if (
+                    source == NeteaseHomePlaylistSource.PERSONALIZED &&
+                    hasRecommendLogin &&
+                    shouldFallbackRecommend(e.code)
+                ) {
+                    NPLogger.w(
+                        TAG,
+                        "refreshRecommend fallback to anonymous due to api_code=${e.code}"
+                    )
+                    val fallbackRaw = withContext(Dispatchers.IO) {
+                        client.getRecommendedPlaylists(
+                            limit = HOME_NETEASE_PLAYLIST_LIMIT,
+                            usePersistedCookies = false
+                        )
+                    }
+                    parseRecommendOnWorker(fallbackRaw)
+                } else {
+                    throw e
+                }
+            }
+        }) {
+            is RetryLoadResult.Success -> {
+                NPLogger.d(
+                    TAG,
+                    "refreshRecommend success: source=$source, count=${result.items.size}"
+                )
+                HomeNeteasePlaylistSectionState(
+                    source = source,
+                    section = HomeSectionState(items = result.items)
+                )
+            }
+            is RetryLoadResult.Failure -> {
+                NPLogger.e(TAG, "refreshRecommend failed: source=$source", result.throwable)
+                HomeNeteasePlaylistSectionState(
+                    source = source,
+                    section = HomeSectionState(error = buildHomeErrorMessage(result.throwable))
+                )
+            }
+        }
+    }
+
+    private suspend fun fetchSongSource(source: NeteaseHomeSongSource): List<SongItem> {
+        if (source == NeteaseHomeSongSource.PRIVATE_FM) {
+            return fetchPrivateFmSongs()
+        }
+        val raw = withContext(Dispatchers.IO) {
+            fetchSongSourceRaw(source)
+        }
+        return parseSongsOnWorker(raw)
+    }
+
+    /** 将首页来源的请求参数集中在一起，避免登录态契约在调用点分散 */
+    private fun fetchSongSourceRaw(source: NeteaseHomeSongSource): String {
+        return when (source) {
+            NeteaseHomeSongSource.TOP_SOARING -> client.getPlaylistDetail(
+                playlistId = NETEASE_TOPLIST_SOARING_ID,
+                n = HOME_NETEASE_SONG_LIMIT,
+                s = 0
+            )
+            NeteaseHomeSongSource.PERSONAL_RADAR -> client.getPlaylistDetail(
+                playlistId = NETEASE_PRIVATE_RADAR_PLAYLIST_ID,
+                n = HOME_NETEASE_SONG_LIMIT,
+                s = 0
+            )
+            NeteaseHomeSongSource.DAILY_RECOMMEND -> client.getDailyRecommendedSongs(
+                afresh = true
+            )
+            NeteaseHomeSongSource.PRIVATE_FM -> client.getPersonalFmSongs()
+            NeteaseHomeSongSource.PERSONALIZED_NEW_SONGS -> client.getPersonalizedNewSongs(
+                limit = HOME_NETEASE_SONG_LIMIT,
+                usePersistedCookies = hasRecommendLogin
+            )
+            NeteaseHomeSongSource.TOP_HOT -> client.getPlaylistDetail(
+                playlistId = NETEASE_TOPLIST_HOT_ID,
+                n = HOME_NETEASE_SONG_LIMIT,
+                s = 0
+            )
+            NeteaseHomeSongSource.TOP_NEW -> client.getPlaylistDetail(
+                playlistId = NETEASE_TOPLIST_NEW_ID,
+                n = HOME_NETEASE_SONG_LIMIT,
+                s = 0
+            )
+        }
+    }
+
+    private suspend fun fetchPrivateFmSongs(): List<SongItem> {
+        var songs = emptyList<SongItem>()
+        for (batchIndex in 0 until HOME_PRIVATE_FM_MAX_BATCHES) {
+            val raw = withContext(Dispatchers.IO) {
+                client.getPersonalFmSongs()
+            }
+            val batch = parseSongsOnWorker(raw)
+            if (batch.isEmpty()) break
+
+            val merged = appendUniqueNeteaseHomeSongs(
+                current = songs,
+                next = batch,
+                limit = HOME_NETEASE_SONG_LIMIT
+            )
+            if (merged.size == songs.size) {
+                NPLogger.d(TAG, "private FM returned no new songs at batch=$batchIndex")
+                break
+            }
+            songs = merged
+            if (songs.size >= HOME_NETEASE_SONG_LIMIT) break
+        }
+        return songs
+    }
+
+    private suspend fun fetchPlaylistSource(
+        source: NeteaseHomePlaylistSource
+    ): List<PlaylistSummary> {
+        val raw = withContext(Dispatchers.IO) {
+            when (source) {
+                NeteaseHomePlaylistSource.PERSONALIZED -> client.getRecommendedPlaylists(
+                    limit = HOME_NETEASE_PLAYLIST_LIMIT,
+                    usePersistedCookies = hasRecommendLogin
+                )
+                NeteaseHomePlaylistSource.DAILY_RESOURCE -> client.getDailyRecommendedPlaylists()
+                NeteaseHomePlaylistSource.HIGH_QUALITY -> client.getHighQualityPlaylists(
+                    cat = "全部",
+                    limit = HOME_NETEASE_PLAYLIST_LIMIT,
+                    before = 0L
+                )
+                NeteaseHomePlaylistSource.HOT_PLAYLISTS -> client.getTopPlaylists(
+                    cat = "全部",
+                    order = "hot",
+                    limit = HOME_NETEASE_PLAYLIST_LIMIT,
+                    usePersistedCookies = hasRecommendLogin
+                )
+                NeteaseHomePlaylistSource.ACG_PLAYLISTS -> client.getTopPlaylists(
+                    cat = "ACG",
+                    order = "hot",
+                    limit = HOME_NETEASE_PLAYLIST_LIMIT,
+                    usePersistedCookies = hasRecommendLogin
+                )
+            }
+        }
+        return parseRecommendOnWorker(raw)
+    }
+
+    private suspend fun loadRadarPlaylistSummaries(
+        expectedRadarCacheContext: String
+    ): List<PlaylistSummary> {
+        val hasLogin = hasRecommendLogin
+        if (hasLogin) {
+            prepareNeteaseRadarSession()
+        }
+        val summaries = loadNeteaseRadarPlaylistSummaries(
+            definitions = NeteaseRadarPlaylistDefinitions,
+            loadMetadata = { playlistId ->
+                client.getRadarPlaylistMetadataCancellable(playlistId)
+            },
+            onLoadFailure = { definition, error ->
+                NPLogger.w(TAG, "radar metadata failed: playlistId=${definition.id}, error=${error.message}")
+            }
+        )
+        if (hasLogin) {
+            persistNeteaseRadarSessionCookies(expectedRadarCacheContext)
+        }
+        return summaries
+    }
+
+    private suspend fun prepareNeteaseRadarSession() {
+        try {
+            withContext(Dispatchers.IO) {
+                client.ensurePersonalizedSession()
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            NPLogger.w(TAG, "radar session preheat failed: ${error.message}")
+        }
+    }
+
+    private fun persistNeteaseRadarSessionCookies(expectedRadarCacheContext: String) {
+        val persisted = repo.getCookiesOnce()
+        if (neteaseRadarCacheContext(persisted) != expectedRadarCacheContext) return
+        val updated = mergeNeteaseSessionCookies(
+            persistedCookies = persisted,
+            runtimeCookies = client.getNeteaseRequestCookies()
+        )
+        if (
+            updated != persisted &&
+                repo.saveCookiesIfCurrent(
+                    expectedCookies = persisted,
+                    cookies = updated
+                )
+        ) {
+            NPLogger.d(TAG, "persisted NetEase radar session context")
+        }
+    }
 
     private fun buildYouTubeAuthFingerprint(bundle: YouTubeAuthBundle): String {
         return bundle.buildRefreshObserverFingerprint()
@@ -581,71 +1112,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun YouTubeAuthBundle.hasYouTubeMusicCookieContext(): Boolean {
         return hasSavedAuthMaterial()
-    }
-
-    private fun parseRecommend(raw: String): List<PlaylistSummary> {
-        val result = mutableListOf<PlaylistSummary>()
-        val root = JSONObject(raw)
-
-        val code = root.optInt("code", -1)
-        if (code != 200) {
-            throw ApiCodeException(code)
-        }
-
-        val arr = root.optJSONArray("result") ?: return emptyList()
-        val size = minOf(arr.length(), 30)
-        for (i in 0 until size) {
-            val obj = arr.optJSONObject(i) ?: continue
-            val id = obj.optLong("id", 0L)
-            val name = obj.optString("name", "")
-            val picUrl = obj.optString("picUrl", "").replace("http://", "https://")
-            val playCount = obj.optLong("playCount", 0L)
-            val trackCount = obj.optInt("trackCount", 0)
-
-            if (id != 0L && name.isNotBlank() && picUrl.isNotBlank()) {
-                result.add(
-                    PlaylistSummary(
-                        id = id,
-                        name = name,
-                        picUrl = picUrl,
-                        playCount = playCount,
-                        trackCount = trackCount
-                    )
-                )
-            }
-        }
-        return result
-    }
-
-    /** 将网易云搜索结果解析为 SongItem 列表 */
-    private fun parseSongs(raw: String): List<SongItem> {
-        val list = mutableListOf<SongItem>()
-        val root = JSONObject(raw)
-        val code = root.optInt("code", -1)
-        if (code != 200) {
-            throw ApiCodeException(code)
-        }
-        val songs = root.optJSONObject("result")?.optJSONArray("songs") ?: return emptyList()
-        for (i in 0 until songs.length()) {
-            val obj = songs.optJSONObject(i) ?: continue
-            val artistItems = parseNeteaseArtistSummaries(obj.optJSONArray("ar"))
-            val albumObj = obj.optJSONObject("al")
-            list.add(
-                SongItem(
-                    id = obj.optLong("id"),
-                    name = obj.optString("name"),
-                    artist = artistItems.joinToString(" / ") { it.name },
-                    album = albumObj?.optString("name").orEmpty(),
-                    albumId = albumObj?.optLong("id", 0L) ?: 0L,
-                    durationMs = obj.optLong("dt"),
-                    coverUrl = albumObj?.optString("picUrl")?.replace("http://", "https://"),
-                    channelId = "netease",
-                    audioId = obj.optLong("id").toString(),
-                    neteaseArtists = artistItems
-                )
-            )
-        }
-        return list
     }
 
     private sealed interface RetryLoadResult<out T> {

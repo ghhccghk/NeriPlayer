@@ -8,6 +8,7 @@ import com.hchen.superlyricapi.SuperLyricLine
 import com.hchen.superlyricapi.SuperLyricWord
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
+import io.github.proify.lyricon.provider.ProviderLogo
 import io.github.proify.lyricon.lyric.model.LyricWord
 import io.github.proify.lyricon.lyric.model.RichLyricLine
 import io.github.proify.lyricon.lyric.model.Song
@@ -24,6 +25,7 @@ import moe.ouom.neriplayer.ui.component.lyrics.LyricEntry
 import moe.ouom.neriplayer.ui.component.lyrics.matchTranslationsToLineIndices
 import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.core.logging.NPLogger
+import moe.ouom.neriplayer.R
 
 object LyriconManager {
     private var provider: LyriconProvider? = null
@@ -44,6 +46,8 @@ object LyriconManager {
     private var songDurationMs: Long = 0L
     @Volatile
     private var playbackSpeed: Float = 1f
+    @Volatile
+    private var effectiveLyricOffsetMs: Long = 0L
 
     fun initialize(context: Context) {
         if (provider != null) return
@@ -51,7 +55,15 @@ object LyriconManager {
             if (SuperLyricHelper.isAvailable()) {
                 SuperLyricHelper.registerPublisher()
             }
-            provider = LyriconFactory.createProvider(context)
+            provider = LyriconFactory.createProvider(
+                context = context.applicationContext,
+                // Lyricon 的状态栏歌词会优先使用 ProviderLogo。
+                // 使用与前台通知相同的纯白透明图标，便于中心服务按状态栏颜色统一着色。
+                logo = ProviderLogo.fromDrawable(
+                    context.applicationContext,
+                    R.drawable.ic_notification_small
+                )
+            )
             provider?.register()
 
             provider?.service?.addConnectionListener {
@@ -123,6 +135,7 @@ object LyriconManager {
             val displayPositionMs = displayLyriconPositionMs(
                 mediaPositionMs = mediaPositionMs,
                 durationMs = songDurationMs,
+                lyricOffsetMs = effectiveLyricOffsetMs,
             )
             runCatching { provider?.player?.setPosition(displayPositionMs) }
             updateSuperLyric(displayPositionMs)
@@ -147,13 +160,24 @@ object LyriconManager {
         val displaySynced = displayLyriconPositionMs(
             mediaPositionMs = mediaSynced,
             durationMs = songDurationMs,
+            lyricOffsetMs = effectiveLyricOffsetMs,
         )
         runCatching { provider?.player?.setPosition(displaySynced) }
     }
 
-    fun updateSong(song: SongItem, lyrics: List<LyricEntry>?, translatedLyrics: List<LyricEntry>?) {
+    fun setLyricOffset(lyricOffsetMs: Long) {
+        effectiveLyricOffsetMs = lyricOffsetMs
+    }
+
+    fun updateSong(
+        song: SongItem,
+        lyrics: List<LyricEntry>?,
+        translatedLyrics: List<LyricEntry>?,
+        lyricOffsetMs: Long = 0L,
+    ) {
         if (!enabled) return
         try {
+            setLyricOffset(lyricOffsetMs)
             LyriconManager.lyrics = lyrics
             LyriconManager.translatedLyrics = translatedLyrics
             translationMatchesByIndex = if (lyrics.isNullOrEmpty()) {
@@ -287,6 +311,7 @@ object LyriconManager {
         translationMatchesByIndex = emptyMap()
         currentSong = null
         songDurationMs = 0L
+        setLyricOffset(0L)
     }
 
     private fun updatePositionAnchor(positionMs: Long) {
@@ -326,6 +351,7 @@ object LyriconManager {
                         val displayPositionMs = displayLyriconPositionMs(
                             mediaPositionMs = mediaPositionMs,
                             durationMs = songDurationMs,
+                            lyricOffsetMs = effectiveLyricOffsetMs,
                         )
                         runCatching { activeProvider.player.setPosition(displayPositionMs) }
                     }

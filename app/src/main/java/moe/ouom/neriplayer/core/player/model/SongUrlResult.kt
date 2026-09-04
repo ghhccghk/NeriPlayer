@@ -29,7 +29,9 @@ internal data class PlaybackUrlCandidate(
     val mimeType: String? = null,
     val expectedContentLength: Long? = null,
     val audioInfo: PlaybackAudioInfo? = null,
-    val cacheKeyOverride: String? = null
+    val representationIdentity: String? = null,
+    val cacheKeyOverride: String? = null,
+    val isPreviewClip: Boolean = false
 ) {
     fun playbackUrls(): List<String> = buildList {
         add(url)
@@ -48,8 +50,10 @@ internal sealed class SongUrlResult {
         val noticeMessage: String? = null,
         val expectedContentLength: Long? = null,
         val audioInfo: PlaybackAudioInfo? = null,
+        val representationIdentity: String? = null,
         val cacheKeyOverride: String? = null,
         val isNeteaseLocalFallback: Boolean = false,
+        val isPreviewClip: Boolean = false,
         val fallbackCandidates: List<PlaybackUrlCandidate> = emptyList()
     ) : SongUrlResult() {
         fun playbackUrls(): List<String> = buildList {
@@ -66,7 +70,9 @@ internal sealed class SongUrlResult {
                     mimeType = mimeType,
                     expectedContentLength = expectedContentLength,
                     audioInfo = audioInfo,
-                    cacheKeyOverride = cacheKeyOverride
+                    representationIdentity = representationIdentity,
+                    cacheKeyOverride = cacheKeyOverride,
+                    isPreviewClip = isPreviewClip
                 )
             }
             return (primary + fallbackCandidates.flatMap { candidate ->

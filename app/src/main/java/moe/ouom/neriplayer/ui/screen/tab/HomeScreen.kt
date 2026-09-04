@@ -26,6 +26,7 @@ package moe.ouom.neriplayer.ui.screen.tab
 import android.app.Application
 import android.content.ClipData
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +49,8 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -65,8 +68,6 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -126,8 +127,10 @@ import moe.ouom.neriplayer.data.local.playlist.LocalPlaylistRepository
 import moe.ouom.neriplayer.data.local.playlist.model.LocalPlaylist
 import moe.ouom.neriplayer.data.playlist.usage.PlaylistUsageRepository
 import moe.ouom.neriplayer.data.local.playlist.system.FavoritesPlaylist
+import moe.ouom.neriplayer.data.local.playlist.system.LocalFilesPlaylist
 import moe.ouom.neriplayer.data.local.playlist.system.SystemLocalPlaylists
 import moe.ouom.neriplayer.data.playlist.usage.UsageEntry
+import moe.ouom.neriplayer.data.playlist.usage.buildLocalPlaylistUsageLookup
 import moe.ouom.neriplayer.data.platform.youtube.buildYouTubeMusicMediaUri
 import moe.ouom.neriplayer.data.local.media.displayAlbum
 import moe.ouom.neriplayer.ui.util.shouldAllowCollapsingTopAppBar
@@ -137,11 +140,16 @@ import moe.ouom.neriplayer.data.model.sameIdentityAs
 import moe.ouom.neriplayer.data.platform.youtube.stableYouTubeMusicId
 import moe.ouom.neriplayer.ui.LocalMiniPlayerHeight
 import moe.ouom.neriplayer.data.model.SongItem
+import moe.ouom.neriplayer.ui.viewmodel.tab.HomeNeteasePlaylistSectionState
+import moe.ouom.neriplayer.ui.viewmodel.tab.HomeNeteaseSongSectionState
 import moe.ouom.neriplayer.ui.viewmodel.tab.HomeSectionState
 import moe.ouom.neriplayer.ui.viewmodel.tab.HomeViewModel
+import moe.ouom.neriplayer.ui.viewmodel.tab.NeteaseHomePlaylistSource
+import moe.ouom.neriplayer.ui.viewmodel.tab.NeteaseHomeSongSource
 import moe.ouom.neriplayer.ui.viewmodel.tab.PlaylistSummary
 import moe.ouom.neriplayer.ui.viewmodel.tab.YouTubeMusicPlaylist
 import moe.ouom.neriplayer.ui.viewmodel.tab.favoriteId
+import moe.ouom.neriplayer.ui.util.rememberPlaylistDisplayCoverUrl
 import moe.ouom.neriplayer.ui.util.rememberSongDisplayCoverUrl
 import moe.ouom.neriplayer.ui.util.currentWindowWidthDp
 import moe.ouom.neriplayer.ui.feedback.NeriOverlaySnackbarHost
@@ -172,16 +180,9 @@ private const val HomeScrollKeyYtShelvesLoading = "home:ytmusic:shelves:loading"
 private const val HomeScrollKeyYtShelvesError = "home:ytmusic:shelves:error"
 private const val HomeScrollKeyYtEmptyFeedLoading = "home:ytmusic:empty-feed:loading"
 private const val HomeScrollKeyYtEmptyFeedError = "home:ytmusic:empty-feed:error"
-private const val HomeScrollKeyNeteaseTrending = "home:netease:trending"
-private const val HomeScrollKeyNeteaseTrendingHeader = "$HomeScrollKeyNeteaseTrending:header"
-private const val HomeScrollKeyNeteaseTrendingContent = "$HomeScrollKeyNeteaseTrending:content"
-private const val HomeScrollKeyNeteaseRadar = "home:netease:radar"
-private const val HomeScrollKeyNeteaseRadarHeader = "$HomeScrollKeyNeteaseRadar:header"
-private const val HomeScrollKeyNeteaseRadarContent = "$HomeScrollKeyNeteaseRadar:content"
-private const val HomeScrollKeyNeteaseRecommended = "home:netease:recommended"
-private const val HomeScrollKeyNeteaseRecommendedHeader = "$HomeScrollKeyNeteaseRecommended:header"
-private const val HomeScrollKeyNeteaseRecommendedLoading = "$HomeScrollKeyNeteaseRecommended:loading"
-private const val HomeScrollKeyNeteaseRecommendedError = "$HomeScrollKeyNeteaseRecommended:error"
+private const val HomeScrollKeyNeteaseRadarPlaylists = "home:netease:radar-playlists"
+private const val HomeScrollKeyNeteaseRadarPlaylistsHeader = "$HomeScrollKeyNeteaseRadarPlaylists:header"
+private const val HomeScrollKeyNeteaseRadarPlaylistsContent = "$HomeScrollKeyNeteaseRadarPlaylists:content"
 
 internal fun shouldShowHomeContinueSection(
     showContinueCard: Boolean,
@@ -189,8 +190,20 @@ internal fun shouldShowHomeContinueSection(
     hasUsage: Boolean
 ): Boolean = showContinueCard && (!usageLoaded || hasUsage)
 
-internal fun homeNeteasePlaylistScrollKey(id: Long): String {
-    return "$HomeScrollKeyNeteaseRecommended:playlist:$id"
+private fun homeNeteaseSongSectionKey(group: String, source: NeteaseHomeSongSource): String {
+    return "home:netease:$group:${source.name.lowercase(Locale.ROOT)}"
+}
+
+private fun homeNeteasePlaylistSectionKey(source: NeteaseHomePlaylistSource): String {
+    return "home:netease:playlist:${source.name.lowercase(Locale.ROOT)}"
+}
+
+internal fun homeNeteasePlaylistScrollKey(sectionKey: String, id: Long): String {
+    return "$sectionKey:playlist:$id"
+}
+
+internal fun homeNeteaseRadarPlaylistScrollKey(id: Long): String {
+    return "$HomeScrollKeyNeteaseRadarPlaylists:playlist:$id"
 }
 
 private fun homeYtMusicPlaylistScrollKey(playlist: YouTubeMusicPlaylist): String {
@@ -223,6 +236,7 @@ fun HomeScreen(
     onItemClick: (PlaylistSummary) -> Unit = {},
     onYouTubeMusicPlaylistClick: (YouTubeMusicPlaylist) -> Unit = {},
     gridState: LazyGridState,
+    radarPlaylistListState: LazyListState,
     topAppBarState: TopAppBarState,
     onScrollAnchorIndexesChanged: (Map<String, Int>) -> Unit = {},
     onOpenRecent: (UsageEntry) -> Unit = {},
@@ -267,6 +281,9 @@ fun HomeScreen(
             .firstOrNull { FavoritesPlaylist.isSystemPlaylist(it, context) }
             ?.songs
             .orEmpty()
+    }
+    val localPlaylistUsageLookup = remember(localPlaylists, context) {
+        buildLocalPlaylistUsageLookup(localPlaylists, context)
     }
 
     val hasLocalUsage = remember(usageEntries) {
@@ -334,8 +351,8 @@ fun HomeScreen(
         hasUsage = usageEntries.isNotEmpty()
     )
     val isInternational = ui.internationalizationEnabled
-    val showNeteaseTrending = showTrendingCard && (isInternational || ui.hasLogin)
-    val showNeteaseRadar = showRadarCard && (isInternational || ui.hasLogin)
+    val showNeteaseTrending = showTrendingCard
+    val showNeteaseRadar = showRadarCard
     val showOnlineFeeds = !offlineMode
     var wasOffline by remember { mutableStateOf(offlineMode) }
     val windowWidthDp = currentWindowWidthDp()
@@ -373,11 +390,9 @@ fun HomeScreen(
 
         wasOffline = false
         if (isInternational) {
-            vm.refreshYtMusicPlaylists()
-            vm.refreshYtMusicHomeFeed()
+            vm.refreshYtMusicHome()
         } else {
-            vm.refreshRecommend()
-            vm.loadHomeRecommendations(force = true)
+            vm.refreshNeteaseHome()
         }
     }
 
@@ -398,11 +413,9 @@ fun HomeScreen(
                         enabled = !offlineMode,
                         onClick = {
                             if (isInternational) {
-                                vm.refreshYtMusicPlaylists()
-                                vm.refreshYtMusicHomeFeed()
+                                vm.refreshYtMusicHome()
                             } else {
-                                vm.refreshRecommend()
-                                vm.loadHomeRecommendations(force = true)
+                                vm.refreshNeteaseHome()
                             }
                         }
                     ) {
@@ -420,12 +433,7 @@ fun HomeScreen(
                 )
             )
 
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.0f)
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+            Box(
                 modifier = Modifier
                     .padding(horizontal = pageHorizontalPadding, vertical = 4.dp)
                     .widthIn(max = 1240.dp)
@@ -451,7 +459,7 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    return@Card
+                    return@Box
                 }
 
                 val miniPlayerHeight = LocalMiniPlayerHeight.current
@@ -493,6 +501,8 @@ fun HomeScreen(
                             if (usageLoaded) {
                                 ContinueSection(
                                     items = usageEntries.take(12),
+                                    localPlaylistLookup = localPlaylistUsageLookup,
+                                    localFilesCoverCandidates = downloadedPlaybackCoverCandidates,
                                     onClick = { entry -> onOpenRecent(entry) },
                                     offlineMode = offlineMode
                                 )
@@ -701,29 +711,79 @@ fun HomeScreen(
                                 }
                             }
                         } else {
-                            if (showNeteaseTrending) {
+                            if (showNeteaseRadar) {
+                                ui.radarSongSections
+                                    .filter { it.source == NeteaseHomeSongSource.PERSONAL_RADAR }
+                                    .forEach { sectionState ->
+                                    val sectionKey = homeNeteaseSongSectionKey(
+                                        group = "radar",
+                                        source = sectionState.source
+                                    )
+                                    addNeteaseSongSection(
+                                        sectionKey = sectionKey,
+                                        registerKey = ::registerGridItemKey,
+                                        sectionState = sectionState,
+                                        icon = neteaseSongSectionIcon(sectionState.source),
+                                        loadingText = homeLoadingText,
+                                        onSongClick = onSongClick,
+                                        favoriteSongs = favoriteSongs,
+                                        onFavoriteToggle = ::toggleHomeSongFavorite,
+                                        onShowSnackbar = showHomeSnackbar,
+                                        offlineMode = offlineMode
+                                    )
+                                }
+
+                                val radarPlaylistState = ui.radarPlaylists
                                 item(
-                                    key = registerGridItemKey(HomeScrollKeyNeteaseTrendingHeader),
+                                    key = registerGridItemKey(
+                                        HomeScrollKeyNeteaseRadarPlaylistsHeader
+                                    ),
                                     span = { GridItemSpan(maxLineSpan) }
                                 ) {
                                     SectionHeader(
-                                        icon = Icons.Outlined.Bolt,
-                                        title = stringResource(R.string.recommend_trending)
+                                        icon = Icons.Outlined.Explore,
+                                        title = stringResource(R.string.home_netease_radar_playlists)
                                     )
                                 }
                                 sectionContent(
-                                    section = ui.hotSongs,
+                                    section = radarPlaylistState,
                                     loadingText = homeLoadingText,
-                                    errorDetail = ui.hotSongs.error,
-                                    keyPrefix = HomeScrollKeyNeteaseTrending,
+                                    errorDetail = radarPlaylistState.error,
+                                    keyPrefix = HomeScrollKeyNeteaseRadarPlaylists,
                                     registerKey = ::registerGridItemKey
                                 ) {
                                     item(
-                                        key = registerGridItemKey(HomeScrollKeyNeteaseTrendingContent),
+                                        key = registerGridItemKey(HomeScrollKeyNeteaseRadarPlaylistsContent),
                                         span = { GridItemSpan(maxLineSpan) }
                                     ) {
-                                        ResponsiveSongPagerList(
-                                            songs = ui.hotSongs.items,
+                                        RadarPlaylistStrip(
+                                            playlists = radarPlaylistState.items,
+                                            favoriteKeys = favoriteKeys,
+                                            listState = radarPlaylistListState,
+                                            onClick = onItemClick,
+                                            onShowSnackbar = { message ->
+                                                scope.launch {
+                                                    snackbarHostState.showNeriSnackbar(message)
+                                                }
+                                            },
+                                            offlineMode = offlineMode
+                                        )
+                                    }
+                                }
+
+                                ui.radarSongSections
+                                    .filter { it.source != NeteaseHomeSongSource.PERSONAL_RADAR }
+                                    .forEach { sectionState ->
+                                        val sectionKey = homeNeteaseSongSectionKey(
+                                            group = "radar",
+                                            source = sectionState.source
+                                        )
+                                        addNeteaseSongSection(
+                                            sectionKey = sectionKey,
+                                            registerKey = ::registerGridItemKey,
+                                            sectionState = sectionState,
+                                            icon = neteaseSongSectionIcon(sectionState.source),
+                                            loadingText = homeLoadingText,
                                             onSongClick = onSongClick,
                                             favoriteSongs = favoriteSongs,
                                             onFavoriteToggle = ::toggleHomeSongFavorite,
@@ -731,92 +791,45 @@ fun HomeScreen(
                                             offlineMode = offlineMode
                                         )
                                     }
-                                }
                             }
 
-                            if (showNeteaseRadar) {
-                                item(
-                                    key = registerGridItemKey(HomeScrollKeyNeteaseRadarHeader),
-                                    span = { GridItemSpan(maxLineSpan) }
-                                ) {
-                                    SectionHeader(
-                                        icon = Icons.Outlined.Radar,
-                                        title = stringResource(R.string.recommend_radar)
+                            if (showNeteaseTrending) {
+                                ui.trendingSongSections.forEach { sectionState ->
+                                    val sectionKey = homeNeteaseSongSectionKey(
+                                        group = "trending",
+                                        source = sectionState.source
                                     )
-                                }
-                                sectionContent(
-                                    section = ui.radarSongs,
-                                    loadingText = homeLoadingText,
-                                    errorDetail = ui.radarSongs.error,
-                                    keyPrefix = HomeScrollKeyNeteaseRadar,
-                                    registerKey = ::registerGridItemKey
-                                ) {
-                                    item(
-                                        key = registerGridItemKey(HomeScrollKeyNeteaseRadarContent),
-                                        span = { GridItemSpan(maxLineSpan) }
-                                    ) {
-                                        ResponsiveSongPagerList(
-                                            songs = ui.radarSongs.items,
-                                            onSongClick = onSongClick,
-                                            favoriteSongs = favoriteSongs,
-                                            onFavoriteToggle = ::toggleHomeSongFavorite,
-                                            onShowSnackbar = showHomeSnackbar,
-                                            offlineMode = offlineMode
-                                        )
-                                    }
+                                    addNeteaseSongSection(
+                                        sectionKey = sectionKey,
+                                        registerKey = ::registerGridItemKey,
+                                        sectionState = sectionState,
+                                        icon = neteaseSongSectionIcon(sectionState.source),
+                                        loadingText = homeLoadingText,
+                                        onSongClick = onSongClick,
+                                        favoriteSongs = favoriteSongs,
+                                        onFavoriteToggle = ::toggleHomeSongFavorite,
+                                        onShowSnackbar = showHomeSnackbar,
+                                        offlineMode = offlineMode
+                                    )
                                 }
                             }
 
                             if (showRecommendedCard) {
-                                item(
-                                    key = registerGridItemKey(HomeScrollKeyNeteaseRecommendedHeader),
-                                    span = { GridItemSpan(maxLineSpan) }
-                                ) {
-                                    SectionHeader(
-                                        icon = Icons.Outlined.Star,
-                                        title = stringResource(R.string.recommend_for_you)
-                                    )
-                                }
-                                when {
-                                    ui.playlists.items.isNotEmpty() -> {
-                                        ui.playlists.items.forEach { playlist ->
-                                            item(
-                                                key = registerGridItemKey(
-                                                    homeNeteasePlaylistScrollKey(playlist.id)
-                                                )
-                                            ) {
-                                                PlaylistCard(
-                                                    playlist = playlist,
-                                                    isFavorite = favoriteKeys.contains("netease:${playlist.id}"),
-                                                    onClick = { onItemClick(playlist) },
-                                                    onShowSnackbar = { message ->
-                                                        scope.launch {
-                                                            snackbarHostState.showNeriSnackbar(message)
-                                                        }
-                                                    },
-                                                    offlineMode = offlineMode
-                                                )
+                                ui.playlistSections.forEach { sectionState ->
+                                    addNeteasePlaylistSection(
+                                        sectionKey = homeNeteasePlaylistSectionKey(sectionState.source),
+                                        registerKey = ::registerGridItemKey,
+                                        sectionState = sectionState,
+                                        loadingText = homeLoadingText,
+                                        favoriteKeys = favoriteKeys,
+                                        onItemClick = onItemClick,
+                                        onShowSnackbar = { message ->
+                                            scope.launch {
+                                                snackbarHostState.showNeriSnackbar(message)
                                             }
-                                        }
-                                    }
-
-                                    ui.playlists.loading -> {
-                                        item(
-                                            key = registerGridItemKey(HomeScrollKeyNeteaseRecommendedLoading),
-                                            span = { GridItemSpan(maxLineSpan) }
-                                        ) {
-                                            SectionLoadingState(homeLoadingText)
-                                        }
-                                    }
-
-                                    ui.playlists.error != null -> {
-                                        item(
-                                            key = registerGridItemKey(HomeScrollKeyNeteaseRecommendedError),
-                                            span = { GridItemSpan(maxLineSpan) }
-                                        ) {
-                                            SectionErrorState(detail = ui.playlists.error ?: "")
-                                        }
-                                    }
+                                        },
+                                        offlineMode = offlineMode
+                                    )
                                 }
                             }
                         }
@@ -865,20 +878,134 @@ private fun <T> LazyGridScope.sectionContent(
     }
 }
 
+private fun LazyGridScope.addNeteaseSongSection(
+    sectionKey: String,
+    registerKey: (String) -> String,
+    sectionState: HomeNeteaseSongSectionState,
+    icon: ImageVector,
+    loadingText: String,
+    onSongClick: (List<SongItem>, Int) -> Unit,
+    favoriteSongs: List<SongItem>,
+    onFavoriteToggle: (SongItem, Boolean) -> Unit,
+    onShowSnackbar: (String) -> Unit,
+    offlineMode: Boolean
+) {
+    item(
+        key = registerKey("$sectionKey:header"),
+        span = { GridItemSpan(maxLineSpan) }
+    ) {
+        SectionHeader(
+            icon = icon,
+            title = stringResource(sectionState.source.titleRes)
+        )
+    }
+    sectionContent(
+        section = sectionState.section,
+        loadingText = loadingText,
+        errorDetail = sectionState.section.error,
+        keyPrefix = sectionKey,
+        registerKey = registerKey
+    ) {
+        item(
+            key = registerKey("$sectionKey:content"),
+            span = { GridItemSpan(maxLineSpan) }
+        ) {
+            ResponsiveSongPagerList(
+                songs = sectionState.section.items,
+                onSongClick = onSongClick,
+                favoriteSongs = favoriteSongs,
+                onFavoriteToggle = onFavoriteToggle,
+                onShowSnackbar = onShowSnackbar,
+                offlineMode = offlineMode
+            )
+        }
+    }
+}
+
+private fun LazyGridScope.addNeteasePlaylistSection(
+    sectionKey: String,
+    registerKey: (String) -> String,
+    sectionState: HomeNeteasePlaylistSectionState,
+    loadingText: String,
+    favoriteKeys: Set<String>,
+    onItemClick: (PlaylistSummary) -> Unit,
+    onShowSnackbar: (String) -> Unit,
+    offlineMode: Boolean
+) {
+    item(
+        key = registerKey("$sectionKey:header"),
+        span = { GridItemSpan(maxLineSpan) }
+    ) {
+        SectionHeader(
+            icon = Icons.Outlined.Star,
+            title = stringResource(sectionState.source.titleRes)
+        )
+    }
+    when {
+        sectionState.section.items.isNotEmpty() -> {
+            sectionState.section.items.forEach { playlist ->
+                item(
+                    key = registerKey(
+                        homeNeteasePlaylistScrollKey(sectionKey, playlist.id)
+                    )
+                ) {
+                    PlaylistCard(
+                        playlist = playlist,
+                        isFavorite = favoriteKeys.contains("netease:${playlist.id}"),
+                        onClick = { onItemClick(playlist) },
+                        onShowSnackbar = onShowSnackbar,
+                        offlineMode = offlineMode
+                    )
+                }
+            }
+        }
+        sectionState.section.loading -> {
+            item(
+                key = registerKey("$sectionKey:loading"),
+                span = { GridItemSpan(maxLineSpan) }
+            ) {
+                SectionLoadingState(loadingText)
+            }
+        }
+        !sectionState.section.error.isNullOrBlank() -> {
+            item(
+                key = registerKey("$sectionKey:error"),
+                span = { GridItemSpan(maxLineSpan) }
+            ) {
+                SectionErrorState(detail = sectionState.section.error.orEmpty())
+            }
+        }
+    }
+}
+
+private fun neteaseSongSectionIcon(source: NeteaseHomeSongSource): ImageVector {
+    return when (source) {
+        NeteaseHomeSongSource.PERSONAL_RADAR -> Icons.Outlined.Radar
+        NeteaseHomeSongSource.TOP_SOARING,
+        NeteaseHomeSongSource.PERSONALIZED_NEW_SONGS,
+        NeteaseHomeSongSource.TOP_HOT,
+        NeteaseHomeSongSource.TOP_NEW -> Icons.Outlined.Bolt
+        NeteaseHomeSongSource.DAILY_RECOMMEND,
+        NeteaseHomeSongSource.PRIVATE_FM -> Icons.Outlined.Explore
+    }
+}
+
 @Composable
 private fun SectionHeader(icon: ImageVector, title: String) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(22.dp)
         )
         Text(
             text = title,
-            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+            color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.padding(start = 8.dp)
         )
     }
@@ -938,7 +1065,7 @@ private fun SongRowMini(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(8.dp))
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1089,6 +1216,173 @@ private fun SongRowMini(
     }
 }
 
+@Composable
+private fun RadarPlaylistStrip(
+    playlists: List<PlaylistSummary>,
+    favoriteKeys: Set<String>,
+    listState: LazyListState,
+    onClick: (PlaylistSummary) -> Unit,
+    onShowSnackbar: (String) -> Unit,
+    offlineMode: Boolean
+) {
+    val cardWidth = if (currentWindowWidthDp() >= 600.dp) 172.dp else 148.dp
+    LazyRow(
+        state = listState,
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        playlists.forEach { playlist ->
+            item(key = homeNeteaseRadarPlaylistScrollKey(playlist.id)) {
+                RadarPlaylistCard(
+                    playlist = playlist,
+                    isFavorite = favoriteKeys.contains("netease:${playlist.id}"),
+                    onClick = { onClick(playlist) },
+                    onShowSnackbar = onShowSnackbar,
+                    offlineMode = offlineMode,
+                    modifier = Modifier.width(cardWidth)
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RadarPlaylistCard(
+    playlist: PlaylistSummary,
+    isFavorite: Boolean,
+    onClick: () -> Unit,
+    onShowSnackbar: (String) -> Unit,
+    offlineMode: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val favoriteRepo = remember(context) { FavoritePlaylistRepository.getInstance(context) }
+    var showMenu by remember { mutableStateOf(false) }
+    val unfavoritedText = stringResource(R.string.home_unfavorited)
+    val favoriteSuccessText = stringResource(R.string.favorite_success)
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showMenu = true }
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.secondaryContainer),
+            contentAlignment = Alignment.Center
+        ) {
+            if (playlist.picUrl.isNotBlank()) {
+                AsyncImage(
+                    model = fastScrollableImageRequest(
+                        context = context,
+                        data = playlist.picUrl,
+                        sizePx = 384,
+                        offlineMode = offlineMode
+                    ),
+                    contentDescription = playlist.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Outlined.Radar,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.size(42.dp)
+                )
+            }
+            Text(
+                text = stringResource(R.string.home_netease_radar_badge),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.86f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)) {
+            Text(
+                text = playlist.name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                text = stringResource(
+                    R.string.home_play_count_format,
+                    formatPlayCount(context, playlist.playCount),
+                    playlist.trackCount
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Clip
+            )
+        }
+
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false }
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isFavorite) {
+                            stringResource(R.string.home_unfavorite_playlist)
+                        } else {
+                            stringResource(R.string.home_favorite_playlist)
+                        }
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (isFavorite) {
+                            Icons.Filled.Favorite
+                        } else {
+                            Icons.Outlined.FavoriteBorder
+                        },
+                        contentDescription = null
+                    )
+                },
+                onClick = {
+                    showMenu = false
+                    scope.launch {
+                        if (isFavorite) {
+                            favoriteRepo.removeFavorite(playlist.id, "netease")
+                            onShowSnackbar(unfavoritedText)
+                        } else {
+                            favoriteRepo.addFavorite(
+                                id = playlist.id,
+                                name = playlist.name,
+                                coverUrl = playlist.picUrl,
+                                trackCount = playlist.trackCount,
+                                source = "netease",
+                                songs = emptyList()
+                            )
+                            onShowSnackbar(favoriteSuccessText)
+                        }
+                    }
+                }
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistCard(
@@ -1108,7 +1402,7 @@ fun PlaylistCard(
 
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { showMenu = true }
@@ -1126,7 +1420,7 @@ fun PlaylistCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(8.dp))
         )
         Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)) {
             Text(
@@ -1314,7 +1608,7 @@ private fun YtMusicPlaylistCard(
 
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { showMenu = true }
@@ -1332,7 +1626,7 @@ private fun YtMusicPlaylistCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(8.dp))
         )
         Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)) {
             Text(
@@ -1424,7 +1718,7 @@ private fun YtMusicHomeItemCard(
 
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = {
@@ -1446,7 +1740,7 @@ private fun YtMusicHomeItemCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(8.dp))
         )
         Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)) {
             Text(
@@ -1705,6 +1999,8 @@ private fun LazyGridScope.addYouTubeMusicSongShelfSection(
 @Composable
 private fun ContinueSection(
     items: List<UsageEntry>,
+    localPlaylistLookup: Map<Long, LocalPlaylist>,
+    localFilesCoverCandidates: List<SongItem>,
     onClick: (UsageEntry) -> Unit,
     offlineMode: Boolean,
     modifier: Modifier = Modifier
@@ -1742,8 +2038,17 @@ private fun ContinueSection(
                         if (entry == null) {
                             Spacer(Modifier.width(cardWidth))
                         } else {
+                            val localPlaylist = if (
+                                entry.source == PlaylistUsageRepository.SOURCE_LOCAL
+                            ) {
+                                localPlaylistLookup[entry.id]
+                            } else {
+                                null
+                            }
                             ContinueCard(
                                 entry = entry,
+                                localPlaylist = localPlaylist,
+                                localFilesCoverCandidates = localFilesCoverCandidates,
                                 onClick = { onClick(entry) },
                                 onRemove = {
                                     AppContainer.launchBackgroundIo {
@@ -1769,6 +2074,8 @@ private fun ContinueSection(
 @Composable
 private fun ContinueCard(
     entry: UsageEntry,
+    localPlaylist: LocalPlaylist?,
+    localFilesCoverCandidates: List<SongItem>,
     onClick: () -> Unit,
     onRemove: () -> Unit,
     offlineMode: Boolean,
@@ -1781,10 +2088,23 @@ private fun ContinueCard(
     val displayName = remember(entry.id, entry.name, entry.source, configuration) {
         SystemLocalPlaylists.resolve(entry.id, entry.name, context)?.currentName ?: entry.name
     }
+    val resolvedLocalCoverUrl = if (localPlaylist != null) {
+        rememberPlaylistDisplayCoverUrl(
+            playlist = localPlaylist,
+            additionalCoverCandidates = if (localPlaylist.id == LocalFilesPlaylist.SYSTEM_ID) {
+                localFilesCoverCandidates
+            } else {
+                emptyList()
+            }
+        )
+    } else {
+        null
+    }
+    val coverUrl = resolvedLocalCoverUrl ?: entry.picUrl
 
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = {
@@ -1796,7 +2116,7 @@ private fun ContinueCard(
         AsyncImage(
             model = fastScrollableImageRequest(
                 context = context,
-                data = entry.picUrl,
+                data = coverUrl,
                 sizePx = 384,
                 offlineMode = offlineMode
             ),
@@ -1805,7 +2125,7 @@ private fun ContinueCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(8.dp))
         )
         Column(modifier = Modifier.padding(6.dp)) {
             Text(

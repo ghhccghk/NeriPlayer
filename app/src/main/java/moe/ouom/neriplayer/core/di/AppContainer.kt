@@ -346,9 +346,9 @@ object AppContainer {
     // 网络客户端
     val neteaseClient by lazy {
         NeteaseClient().also { client ->
-            val cookies = neteaseCookieRepo.cookieFlow.value.toMutableMap()
-            cookies.putIfAbsent("os", "pc")
-            client.setPersistedCookies(cookies)
+            neteaseCookieRepo.withCurrentCookies { cookies ->
+                client.setPersistedCookies(cookies)
+            }
         }
     }
 
@@ -514,10 +514,9 @@ object AppContainer {
     private fun startCookieObserver() {
         neteaseCookieRepo.cookieFlow
             .onEach { cookies ->
-                val mutableCookies = cookies.toMutableMap()
-                mutableCookies.putIfAbsent("os", "pc")
-
-                neteaseClient.setPersistedCookies(mutableCookies)
+                neteaseCookieRepo.withCurrentCookiesIfMatches(cookies) { currentCookies ->
+                    neteaseClient.setPersistedCookies(currentCookies)
+                }
             }
             .launchIn(scope)
 

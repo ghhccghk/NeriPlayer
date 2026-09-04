@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.net.toUri
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.util.StuckPlayerException
+import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.ContentMetadata
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -23,6 +25,7 @@ import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.core.player.download.AudioDownloadManager
 import moe.ouom.neriplayer.core.player.lifecycle.updateAudioOffloadPreferences
 import moe.ouom.neriplayer.core.player.model.PlaybackAudioInfo
+import moe.ouom.neriplayer.core.player.model.PlaybackAudioSource
 import moe.ouom.neriplayer.core.player.model.PlayerEvent
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -46,6 +49,7 @@ import moe.ouom.neriplayer.core.player.playback.advanceAfterPlaybackFailure
 import moe.ouom.neriplayer.core.player.playback.BiliSponsorBlockPlaybackController
 import moe.ouom.neriplayer.core.player.playback.BiliVideoSkipPlaybackController
 import moe.ouom.neriplayer.core.player.playback.preparePlayerForManagedStart
+import moe.ouom.neriplayer.core.player.playback.startProgressUpdates
 import moe.ouom.neriplayer.core.player.prefetch.consumeGenericUrlPrefetch
 import moe.ouom.neriplayer.core.player.quality.effectiveBiliQuality
 import moe.ouom.neriplayer.core.player.quality.effectiveNeteaseQuality
@@ -59,6 +63,7 @@ import moe.ouom.neriplayer.core.player.watchdog.resetPlaybackProgressAdvanceBase
 import moe.ouom.neriplayer.core.player.watchdog.schedulePlaybackStartupWatchdog
 import moe.ouom.neriplayer.data.model.recoverNeteaseRemoteSourceFromStaleLocalCopy
 import moe.ouom.neriplayer.data.model.sameIdentityAs
+import moe.ouom.neriplayer.data.platform.bili.BiliAudioStreamInfo
 import moe.ouom.neriplayer.data.platform.bili.BiliVideoSkipTarget
 import moe.ouom.neriplayer.data.platform.youtube.extractYouTubeMusicVideoId
 import moe.ouom.neriplayer.data.model.SongItem
@@ -66,6 +71,8 @@ import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.listentogether.mapping.MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
 import moe.ouom.neriplayer.listentogether.mapping.toListenTogetherTrackOrNull
 import moe.ouom.neriplayer.listentogether.mapping.trustedListenTogetherStreamUrls
+import moe.ouom.neriplayer.listentogether.playback.shouldPreferListenTogetherSourceBeforeNeteaseFallback
+import moe.ouom.neriplayer.listentogether.playback.shouldSuppressListenTogetherResolverError
 import moe.ouom.neriplayer.core.player.quality.effectiveKuGouQuality
 import java.io.File
 
@@ -73,19 +80,104 @@ internal const val OFFLINE_CACHE_URL_PREFIX = "http://offline.cache/"
 internal const val YOUTUBE_PLAYBACK_PREFER_M4A = false
 internal const val YOUTUBE_STABLE_RECOVERY_QUALITY = "high"
 
+internal data class CachedResourceIntegrity(
+    val isComplete: Boolean,
+    val requiresRepair: Boolean,
+    val coveredLength: Long
+)
+
+internal enum class CachePrefetchReadiness {
+    COMPLETE,
+    READY_FOR_PREFETCH,
+    UNAVAILABLE
+}
+
+internal fun inspectCachedResourceSpans(
+    spans: Collection<CacheSpan>,
+    contentLength: Long
+): CachedResourceIntegrity {
+    if (contentLength <= 0L || spans.isEmpty()) {
+        return CachedResourceIntegrity(
+            isComplete = false,
+            requiresRepair = false,
+            coveredLength = 0L
+        )
+    }
+
+    var coveredUntil = 0L
+    var requiresRepair = false
+    var hasGap = false
+    for (span in spans.sortedBy { it.position }) {
+        val file = span.file
+        val hasValidFile = span.isCached &&
+            span.position >= 0L &&
+            span.length > 0L &&
+            file?.isFile == true &&
+            file.length() == span.length
+        if (!hasValidFile) {
+            requiresRepair = true
+            continue
+        }
+
+        val endPosition = span.position + span.length
+        if (endPosition < span.position) {
+            requiresRepair = true
+            continue
+        }
+        if (
+            span.position >= contentLength ||
+            endPosition > contentLength
+        ) {
+            requiresRepair = true
+            continue
+        }
+        if (span.position > coveredUntil) {
+            hasGap = true
+            continue
+        }
+        if (span.position < coveredUntil) {
+            requiresRepair = true
+            continue
+        }
+        coveredUntil = maxOf(coveredUntil, endPosition)
+    }
+
+    return CachedResourceIntegrity(
+        isComplete = coveredUntil >= contentLength && !requiresRepair && !hasGap,
+        requiresRepair = requiresRepair,
+        coveredLength = coveredUntil
+    )
+}
+
 internal suspend fun PlayerManager.resolveSongUrl(
     song: SongItem,
     forceRefresh: Boolean = false,
     youtubeRecoveryStrategy: YouTubePlaybackRecoveryStrategy? = null,
     sideEffects: RefreshResolverSideEffects = RefreshResolverSideEffects(),
     allowGenericPrefetchCache: Boolean = true,
-    playbackRequestTokenOverride: Long? = null
+    playbackRequestTokenOverride: Long? = null,
+    shouldApplyCacheMutation: () -> Boolean = { true }
 ): SongUrlResult {
     NPLogger.d(
         "NERI-PlayerManager",
         "resolveSongUrl: song=${song.name}, source=${song.album}, forceRefresh=$forceRefresh, streamUrl=${song.streamUrl}, currentUrl=${_currentMediaUrl.value}, stack=[${debugStackHint()}]"
     )
-    if (!forceRefresh && isDirectStreamUrl(song.streamUrl)) {
+    val initialListenTogetherFallback = listenTogetherFallbackResult(song)
+    val suppressListenTogetherResolverErrors = shouldSuppressListenTogetherResolverError(
+        listenerAudioLinkSharingActive = isListenTogetherAudioLinkFallbackEnabled(),
+        controllerLinkConfirmedUnavailable =
+            isListenTogetherAuthoritativeStreamConfirmedUnavailable(song)
+    )
+    val shouldDeferNeteaseAlternateSources =
+        shouldPreferListenTogetherSourceBeforeNeteaseFallback(
+            listenerAudioLinkSharingActive = isListenTogetherAudioLinkFallbackEnabled()
+        )
+    if (
+        shouldUseDirectStreamShortcut(
+            forceRefresh = forceRefresh,
+            hasListenTogetherFallback = initialListenTogetherFallback != null
+        ) && isDirectStreamUrl(song.streamUrl)
+    ) {
         prepareBiliPlaybackSkipsForResolvedPlayback(song, playbackRequestTokenOverride)
         return SongUrlResult.Success(song.streamUrl.orEmpty())
     }
@@ -113,7 +205,8 @@ internal suspend fun PlayerManager.resolveSongUrl(
                 youtubeRecoveryStrategy = youtubeRecoveryStrategy,
                 sideEffects = sideEffects,
                 allowGenericPrefetchCache = allowGenericPrefetchCache,
-                playbackRequestTokenOverride = playbackRequestTokenOverride
+                playbackRequestTokenOverride = playbackRequestTokenOverride,
+                shouldApplyCacheMutation = shouldApplyCacheMutation
             )
         }
         sideEffects.emitError {
@@ -129,120 +222,189 @@ internal suspend fun PlayerManager.resolveSongUrl(
             "NERI-PlayerManager",
             "resolveSongUrl: hit local playback cache for song=${song.name}"
         )
-        return localResult
+        return mergeListenTogetherFallbackResult(
+            localResult = localResult,
+            listenTogetherFallback = initialListenTogetherFallback,
+            preferredQualityKey = listenTogetherPreferredQualityKey(song)
+        )
     }
     val isYouTubeTrack = isYouTubeMusicTrack(song)
-    val resolvedYouTubeQuality = youtubeRecoveryStrategy?.preferredQualityOverride
-        ?: effectiveYouTubeQuality()
     val cacheKey = computeCacheKey(
         song = song,
         youtubeQualityOverride = youtubeRecoveryStrategy?.preferredQualityOverride,
         youtubePreferM4aOverride = youtubeRecoveryStrategy?.preferM4a
     )
-    val hasCachedData = if (forceRefresh) {
+    val cacheKeyIsUnsafe = loadPlaybackCacheKeySafety(cacheKey)
+    val cacheIntegrity = if (forceRefresh) {
         NPLogger.d(
             "NERI-PlayerManager",
             "resolveSongUrl: bypass complete YouTube cache for forced refresh: $cacheKey"
         )
-        false
+        CachedResourceIntegrity(false, false, 0L)
     } else {
-        checkExoPlayerCache(cacheKey)
+        inspectExoPlayerCache(cacheKey)
+    }
+    if (cacheIntegrity.requiresRepair) {
+        invalidateCachedResourceForPlaybackRecovery(
+            cacheKey = cacheKey,
+            reason = "resolve_integrity_check",
+            shouldApplyMutation = shouldApplyCacheMutation
+        )
+    }
+    var hasCachedData = !forceRefresh &&
+        cacheIntegrity.isComplete &&
+        !cacheKeyIsUnsafe
+    if (hasCachedData) {
+        val cachedDescriptor = cache?.readCachedPlaybackDescriptor(cacheKey)
+        val cachedAudioInfo = cachedDescriptor?.toPlaybackAudioInfo {
+            getLocalizedString(it)
+        }
+        val cachedContentLength = cache?.let {
+            ContentMetadata.getContentLength(it.getContentMetadata(cacheKey))
+        } ?: 0L
+        if (
+            cachedAudioInfo == null ||
+            !cachedDescriptor.matchesCachedContentLength(cachedContentLength)
+        ) {
+            NPLogger.w(
+                "NERI-PlayerManager",
+                "完整缓存描述符缺失或长度不匹配，淘汰旧资源并重新解析: key=$cacheKey"
+            )
+            val removed = invalidateCachedResourceForPlaybackRecovery(
+                cacheKey = cacheKey,
+                reason = "missing_playback_descriptor",
+                shouldApplyMutation = shouldApplyCacheMutation
+            )
+            hasCachedData = false
+            if (!removed) {
+                NPLogger.w(
+                    "NERI-PlayerManager",
+                    "无法移除缺少描述符的缓存，跳过离线复用: key=$cacheKey"
+                )
+            }
+        }
     }
     if (hasCachedData) {
         NPLogger.d(
             "NERI-PlayerManager",
             "命中完整缓存，直接走离线缓存地址: $cacheKey"
         )
-        val cachedAudioInfo = _currentPlaybackAudioInfo.value
-            ?.takeIf { _currentSongFlow.value?.sameIdentityAs(song) == true }
-            ?.takeIf { youtubeRecoveryStrategy == null }
-            ?: when {
-                isYouTubeTrack -> {
-                    buildYouTubeOfflineCacheAudioInfo(resolvedYouTubeQuality) {
-                        getLocalizedString(it)
-                    }
-                }
-
-                !isBiliTrack(song) -> {
-                    buildNeteaseOfflineCacheAudioInfo(effectiveNeteaseQuality()) {
-                        getLocalizedString(it)
-                    }
-                }
-
-                else -> null
-            }
+        val cachedDescriptor = cache?.readCachedPlaybackDescriptor(cacheKey)
+        val cachedAudioInfo = cachedDescriptor?.toPlaybackAudioInfo {
+            getLocalizedString(it)
+        } ?: return SongUrlResult.Failure
         prepareBiliPlaybackSkipsForResolvedPlayback(song, playbackRequestTokenOverride)
-        return SongUrlResult.Success(
+        val cachedResult = SongUrlResult.Success(
             url = "$OFFLINE_CACHE_URL_PREFIX$cacheKey",
             durationMs = song.durationMs.takeIf { it > 0L },
             audioInfo = cachedAudioInfo,
+            mimeType = cachedAudioInfo.mimeType,
+            expectedContentLength = cachedDescriptor.expectedContentLength,
+            representationIdentity = cachedDescriptor.representationIdentity,
             cacheKeyOverride = cacheKey
+        )
+        return mergeListenTogetherFallbackResult(
+            localResult = cachedResult,
+            listenTogetherFallback = initialListenTogetherFallback,
+            preferredQualityKey = listenTogetherPreferredQualityKey(song)
         )
     }
     if (!forceRefresh && allowGenericPrefetchCache && !isYouTubeTrack) {
         consumeGenericUrlPrefetch(cacheKey)?.let { prefetchedResult ->
             prepareBiliPlaybackSkipsForResolvedPlayback(song)
-            return prefetchedResult
+            return mergeListenTogetherFallbackResult(
+                localResult = prefetchedResult,
+                listenTogetherFallback = initialListenTogetherFallback,
+                preferredQualityKey = listenTogetherPreferredQualityKey(song)
+            )
         }
     }
-    val initialListenTogetherFallback = listenTogetherFallbackResult(song)
-    val resolverSideEffects = if (initialListenTogetherFallback != null) {
+    val resolverSideEffects = if (
+        initialListenTogetherFallback != null || suppressListenTogetherResolverErrors
+    ) {
         RefreshResolverSideEffects(RefreshSideEffectGate { false })
     } else {
         sideEffects
     }
-    val result = when {
-        isYouTubeTrack -> getYouTubeMusicAudioUrl(
-            song = song,
-            suppressError = hasCachedData,
-            forceRefresh = forceRefresh,
-            youtubeRecoveryStrategy = youtubeRecoveryStrategy,
-            sideEffects = resolverSideEffects
-        )
-        isBiliTrack(song) -> getBiliAudioUrl(
-            song = song,
-            suppressError = hasCachedData,
-            sideEffects = resolverSideEffects
-        )
-        isKugouTrack(song) -> getKugouAudioUrl(
-            song = song,
-            forceRefresh = forceRefresh,
-            sideEffects = sideEffects
-        )
-        else -> getNeteaseSongUrl(
-            song = song,
-            suppressError = hasCachedData,
-            sideEffects = resolverSideEffects
-        )
+    val result = retrySongUrlResolution { retryAttempt ->
+        val isFinalAttempt = retryAttempt == SONG_URL_RESOLUTION_RETRY_COUNT
+        if (retryAttempt > 0) {
+            NPLogger.w(
+                "NERI-PlayerManager",
+                "resolveSongUrl: retry=$retryAttempt/$SONG_URL_RESOLUTION_RETRY_COUNT, song=${song.name}, source=${song.album}"
+            )
+        }
+        val suppressError = hasCachedData ||
+            !isFinalAttempt ||
+            initialListenTogetherFallback != null ||
+            suppressListenTogetherResolverErrors
+        when {
+            isYouTubeTrack -> getYouTubeMusicAudioUrl(
+                song = song,
+                suppressError = suppressError,
+                forceRefresh = forceRefresh,
+                youtubeRecoveryStrategy = youtubeRecoveryStrategy,
+                sideEffects = resolverSideEffects
+            )
+            isBiliTrack(song) -> getBiliAudioUrl(
+                song = song,
+                suppressError = suppressError,
+                sideEffects = resolverSideEffects,
+                playbackRequestTokenOverride = playbackRequestTokenOverride
+            )
+            isKugouTrack(song) -> getKugouAudioUrl(
+                song = song,
+                forceRefresh = forceRefresh,
+                sideEffects = sideEffects
+            )
+            else -> getNeteaseSongUrl(
+                song = song,
+                suppressError = suppressError,
+                sideEffects = resolverSideEffects,
+                allowLocalFallback = !shouldDeferNeteaseAlternateSources,
+                allowAutoBiliFallback = !shouldDeferNeteaseAlternateSources
+            )
+        }
     }
 
-    val listenTogetherFallback = if (
-        result is SongUrlResult.Failure || result is SongUrlResult.RequiresLogin
-    ) {
-        listenTogetherFallbackResult(song)
-    } else {
-        null
-    }
+    val listenTogetherFallback = listenTogetherFallbackResult(song)
+    val resolvedResult = mergeListenTogetherFallbackResult(
+        localResult = result,
+        listenTogetherFallback = listenTogetherFallback,
+        preferredQualityKey = listenTogetherPreferredQualityKey(song)
+    )
     if (listenTogetherFallback != null) {
+        val localCandidateCount = (result as? SongUrlResult.Success)
+            ?.playbackCandidates()
+            ?.size
+            ?: 0
+        val fallbackCandidateCount = listenTogetherFallback.playbackCandidates().size
+        val action = if (result is SongUrlResult.Success) "append" else "use"
         NPLogger.w(
             "NERI-PlayerManager",
-            "resolveSongUrl: local resolution failed, use isolated listen-together fallback: song=${song.name}, candidates=${listenTogetherFallback.playbackCandidates().size}"
+            "resolveSongUrl: $action isolated listen-together fallback candidates: " +
+                "song=${song.name}, localCandidates=$localCandidateCount, " +
+                "fallbackCandidates=$fallbackCandidateCount"
         )
-        return listenTogetherFallback
     }
 
-    return if (result is SongUrlResult.Failure && hasCachedData) {
+    return if (resolvedResult is SongUrlResult.Failure && hasCachedData) {
         NPLogger.d("NERI-PlayerManager", "远端解析失败但缓存完整，回退到离线缓存地址: $cacheKey")
-        val fallbackAudioInfo = _currentPlaybackAudioInfo.value
-            ?.takeIf { _currentSongFlow.value?.sameIdentityAs(song) == true }
+        val fallbackDescriptor = cache?.readCachedPlaybackDescriptor(cacheKey)
+        val fallbackAudioInfo = fallbackDescriptor?.toPlaybackAudioInfo {
+            getLocalizedString(it)
+        }
         SongUrlResult.Success(
             url = "$OFFLINE_CACHE_URL_PREFIX$cacheKey",
             audioInfo = fallbackAudioInfo,
+            mimeType = fallbackAudioInfo?.mimeType,
+            expectedContentLength = fallbackDescriptor?.expectedContentLength,
+            representationIdentity = fallbackDescriptor?.representationIdentity,
             cacheKeyOverride = cacheKey,
             durationMs = song.durationMs.takeIf { it > 0L }
         )
     } else {
-        result
+        resolvedResult
     }
 }
 
@@ -270,140 +432,202 @@ private fun PlayerManager.prepareBiliPlaybackSkipsForResolvedPlayback(
     )
 }
 
-internal suspend fun PlayerManager.resolveShareableListenTogetherStreamUrl(
-    song: SongItem
-): SongUrlResult {
-    NPLogger.d(
-        "NERI-PlayerManager",
-        "resolveShareableListenTogetherStreamUrl: song=${song.name}, source=${song.album}, streamUrl=${song.streamUrl}, currentUrl=${_currentMediaUrl.value}, stack=[${debugStackHint()}]"
-    )
-    if (isDirectStreamUrl(song.streamUrl)) {
-        return SongUrlResult.Success(song.streamUrl.orEmpty())
-    }
-    if (isLocalSong(song)) {
-        NPLogger.w(
-            "NERI-PlayerManager",
-            "resolveShareableListenTogetherStreamUrl: skip local-only song=${song.name}"
-        )
-        return SongUrlResult.Failure
-    }
-
-    val sideEffects = RefreshResolverSideEffects(RefreshSideEffectGate { false })
-    val result = retrySongUrlResolution { retryAttempt ->
-        if (retryAttempt > 0) {
-            NPLogger.w(
-                "NERI-PlayerManager",
-                "resolveShareableListenTogetherStreamUrl: retry=$retryAttempt/$SONG_URL_RESOLUTION_RETRY_COUNT, song=${song.name}, source=${song.album}"
-            )
-        }
-        when {
-            isYouTubeMusicTrack(song) -> getYouTubeMusicAudioUrl(
-                song = song,
-                suppressError = true,
-                forceRefresh = true,
-                sideEffects = sideEffects
-            )
-            isBiliTrack(song) -> getBiliAudioUrl(
-                song = song,
-                suppressError = true,
-                sideEffects = sideEffects
-            )
-            isKugouTrack(song) -> getKugouAudioUrl(
-                song = song,
-                forceRefresh = true,
-                sideEffects = sideEffects
-            )
-            else -> getNeteaseSongUrl(
-                song = song,
-                suppressError = true,
-                sideEffects = sideEffects,
-                allowLocalFallback = false
-            )
-        }
-    }
-    if (result is SongUrlResult.Success && !isDirectStreamUrl(result.url)) {
-        NPLogger.w(
-            "NERI-PlayerManager",
-            "resolveShareableListenTogetherStreamUrl: rejected non-http result song=${song.name}, url=${result.url}"
-        )
-        return SongUrlResult.Failure
-    }
-    return result
-}
+internal data class ShareableListenTogetherStreamResolution(
+    val streamUrls: List<String>,
+    val isPreviewOnly: Boolean
+)
 
 internal suspend fun PlayerManager.resolveShareableListenTogetherStreamUrls(
     song: SongItem
-): List<String> {
-    val track = song.toListenTogetherTrackOrNull() ?: return emptyList()
-    val urls = linkedSetOf<String>()
-    fun addResult(result: SongUrlResult) {
-        (result as? SongUrlResult.Success)
-            ?.playbackUrls()
-            ?.forEach(urls::add)
+): ShareableListenTogetherStreamResolution {
+    val track = song.toListenTogetherTrackOrNull()
+        ?: return ShareableListenTogetherStreamResolution(emptyList(), isPreviewOnly = false)
+    val resolution = when {
+        isYouTubeMusicTrack(song) -> resolveYouTubeListenTogetherShareableStreams(song)
+        isBiliTrack(song) -> resolveBiliListenTogetherShareableStreams(song)
+        else -> resolveNeteaseListenTogetherShareableStreams(song)
     }
-
-    addResult(resolveShareableListenTogetherStreamUrl(song))
-    when {
-        isBiliTrack(song) -> Unit
-        isYouTubeMusicTrack(song) && urls.size < MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES -> {
-            addResult(
-                getYouTubeMusicAudioUrl(
-                    song = song,
-                    suppressError = true,
-                    forceRefresh = false,
-                    youtubeRecoveryStrategy = YouTubePlaybackRecoveryStrategy(
-                        preferredQualityOverride = YOUTUBE_STABLE_RECOVERY_QUALITY,
-                        requireDirect = false,
-                        preferM4a = true
-                    ),
-                    sideEffects = RefreshResolverSideEffects(RefreshSideEffectGate { false })
-                )
-            )
-        }
-        urls.size < MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES -> {
-            urls += resolveAdditionalNeteaseShareableUrls(
-                song = song,
-                maxCount = MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES - urls.size
-            )
-        }
-    }
-    return trustedListenTogetherStreamUrls(
+    val trustedUrls = trustedListenTogetherStreamUrls(
         channelId = track.channelId,
-        streamUrls = urls.toList(),
+        streamUrls = resolution.streamUrls,
         maxCount = MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
+    )
+    return ShareableListenTogetherStreamResolution(
+        streamUrls = trustedUrls,
+        isPreviewOnly = resolution.isPreviewOnly && trustedUrls.isEmpty()
     )
 }
 
-private suspend fun PlayerManager.resolveAdditionalNeteaseShareableUrls(
-    song: SongItem,
-    maxCount: Int
-): List<String> = withContext(Dispatchers.IO) {
-    if (maxCount <= 0 || isLocalSong(song) || isBiliTrack(song) || isYouTubeMusicTrack(song)) {
-        return@withContext emptyList()
+private suspend fun PlayerManager.resolveNeteaseListenTogetherShareableStreams(
+    song: SongItem
+): ShareableListenTogetherStreamResolution = withContext(Dispatchers.IO) {
+    if (isLocalSong(song)) {
+        return@withContext ShareableListenTogetherStreamResolution(
+            streamUrls = emptyList(),
+            isPreviewOnly = false
+        )
     }
-    val urls = linkedSetOf<String>()
-    for (quality in buildNeteaseQualityCandidates(effectiveNeteaseQuality())) {
-        if (urls.size >= maxCount) break
-        val response = runCatching {
-            neteaseClient.getSongDownloadUrl(song.id, level = quality)
-        }.getOrNull() ?: continue
-        val parsed = NeteasePlaybackResponseParser.parsePlayback(response, song.durationMs)
-        if (parsed !is NeteasePlaybackResponseParser.PlaybackResult.Success ||
-            parsed.notice == NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP
-        ) {
-            continue
-        }
-        val resolvedUrl = buildNeteaseSuccessResult(
-            parsed = parsed,
-            resolvedQualityKey = quality,
-            fallbackDurationMs = song.durationMs,
-            getLocalizedString = { getLocalizedString(it) }
-        ).url
-        if (isDirectStreamUrl(resolvedUrl)) {
-            urls += resolvedUrl
+    val streamUrls = linkedSetOf<String>()
+    val resolvedQualityKeys = linkedSetOf<String>()
+    var previewOnly = false
+    val qualityGroups = buildListenTogetherNeteaseQualityGroups(effectiveNeteaseQuality())
+    for (qualityGroup in qualityGroups) {
+        if (streamUrls.size >= MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES) break
+        for (requestedQuality in qualityGroup) {
+            val response = runCatching {
+                neteaseClient.getSongDownloadUrl(song.id, level = requestedQuality)
+            }.getOrNull() ?: continue
+            when (val parsed = NeteasePlaybackResponseParser.parsePlayback(response, song.durationMs)) {
+                is NeteasePlaybackResponseParser.PlaybackResult.Success -> {
+                    if (parsed.notice == NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP) {
+                        previewOnly = true
+                        continue
+                    }
+                    val resolved = buildNeteaseSuccessResult(
+                        parsed = parsed,
+                        resolvedQualityKey = requestedQuality,
+                        fallbackDurationMs = song.durationMs,
+                        getLocalizedString = { getLocalizedString(it) }
+                    )
+                    if (isDirectStreamUrl(resolved.url)) {
+                        val actualQualityKey = resolved.audioInfo?.qualityKey
+                            ?.trim()
+                            ?.lowercase()
+                            ?.ifBlank { requestedQuality }
+                            ?: requestedQuality
+                        if (tryRegisterNeteaseListenTogetherQualityCandidate(
+                                resolvedQualityKeys = resolvedQualityKeys,
+                                actualQualityKey = actualQualityKey
+                            )
+                        ) {
+                            streamUrls += decorateListenTogetherStreamUrl(
+                                streamUrl = resolved.url,
+                                source = PlaybackAudioSource.NETEASE,
+                                qualityKey = actualQualityKey
+                            )
+                            break
+                        }
+                    }
+                }
+                NeteasePlaybackResponseParser.PlaybackResult.RequiresLogin,
+                is NeteasePlaybackResponseParser.PlaybackResult.Failure -> Unit
+            }
         }
     }
-    urls.toList()
+    ShareableListenTogetherStreamResolution(
+        streamUrls = streamUrls.toList(),
+        isPreviewOnly = previewOnly
+    )
+}
+
+private suspend fun PlayerManager.resolveBiliListenTogetherShareableStreams(
+    song: SongItem
+): ShareableListenTogetherStreamResolution = withContext(Dispatchers.IO) {
+    val resolvedSong = resolveBiliSong(song, biliClient)
+        ?: return@withContext ShareableListenTogetherStreamResolution(emptyList(), false)
+    if (resolvedSong.cid == 0L) {
+        return@withContext ShareableListenTogetherStreamResolution(emptyList(), false)
+    }
+    val availableStreams = runCatching {
+        biliRepo.getAudioWithDecision(
+            bvid = resolvedSong.videoInfo.bvid,
+            cid = resolvedSong.cid,
+            preferredKeyOverride = effectiveBiliQuality()
+        ).first
+    }.getOrElse { emptyList() }
+    val streamUrls = buildBiliListenTogetherStreamUrls(
+        selectedStreams = selectBiliListenTogetherShareableStreams(
+            availableStreams = availableStreams,
+            preferredQualityKey = effectiveBiliQuality()
+        )
+    )
+    ShareableListenTogetherStreamResolution(
+        streamUrls = streamUrls,
+        isPreviewOnly = false
+    )
+}
+
+internal fun selectBiliListenTogetherShareableStreams(
+    availableStreams: List<BiliAudioStreamInfo>,
+    preferredQualityKey: String = "high"
+): List<BiliAudioStreamInfo> {
+    val streamsByQuality = availableStreams
+        .filter { it.url.isNotBlank() }
+        .groupBy(::inferBiliQualityKey)
+        .mapValues { (_, streams) -> streams.sortedByDescending { it.bitrateKbps } }
+    val selected = buildListenTogetherBiliQualityOrder(
+        preferredQualityKey = preferredQualityKey,
+        availableQualityKeys = streamsByQuality.keys
+    ).mapNotNull { quality -> streamsByQuality[quality]?.firstOrNull() }
+    return selected
+        .distinctBy { it.url }
+        .take(MAX_LISTEN_TOGETHER_BILI_STREAM_URL_CANDIDATES)
+}
+
+internal fun buildBiliListenTogetherStreamUrls(
+    selectedStreams: List<BiliAudioStreamInfo>,
+    maxCount: Int = MAX_LISTEN_TOGETHER_BILI_STREAM_URL_CANDIDATES
+): List<String> {
+    if (maxCount <= 0) return emptyList()
+    return buildList {
+        selectedStreams.forEach { stream ->
+            val qualityKey = inferBiliQualityKey(stream)
+            val streamUrl = stream.url.trim()
+            if (
+                streamUrl.startsWith("https://", ignoreCase = true) ||
+                streamUrl.startsWith("http://", ignoreCase = true)
+            ) {
+                add(
+                    decorateListenTogetherStreamUrl(
+                        streamUrl = streamUrl,
+                        source = PlaybackAudioSource.BILIBILI,
+                        qualityKey = qualityKey
+                    )
+                )
+            }
+        }
+    }.distinct().take(maxCount)
+}
+
+private suspend fun PlayerManager.resolveYouTubeListenTogetherShareableStreams(
+    song: SongItem
+): ShareableListenTogetherStreamResolution {
+    val streamUrls = linkedSetOf<String>()
+    val resolvedQualityKeys = linkedSetOf<String>()
+    val preferredQualityKey = effectiveYouTubeQuality()
+    for (requestedQuality in buildListenTogetherYouTubeQualityOrder(preferredQualityKey)) {
+        if (streamUrls.size >= MAX_LISTEN_TOGETHER_YOUTUBE_STREAM_URL_CANDIDATES) break
+        val result = getYouTubeMusicAudioUrl(
+            song = song,
+            suppressError = true,
+            forceRefresh = false,
+            youtubeRecoveryStrategy = YouTubePlaybackRecoveryStrategy(
+                preferredQualityOverride = requestedQuality,
+                requireDirect = false,
+                preferM4a = false
+            ),
+            sideEffects = RefreshResolverSideEffects(RefreshSideEffectGate { false })
+        ) as? SongUrlResult.Success ?: continue
+        val streamUrl = result.url.takeIf(::isDirectStreamUrl) ?: continue
+        val actualQualityKey = result.audioInfo?.qualityKey
+            ?.trim()
+            ?.lowercase()
+            ?.ifBlank { requestedQuality }
+            ?: requestedQuality
+        if (!resolvedQualityKeys.add(actualQualityKey)) continue
+        streamUrls += decorateListenTogetherStreamUrl(
+            streamUrl = streamUrl,
+            source = PlaybackAudioSource.YOUTUBE_MUSIC,
+            qualityKey = actualQualityKey
+        )
+    }
+    if (streamUrls.isEmpty()) {
+        return ShareableListenTogetherStreamResolution(emptyList(), false)
+    }
+    return ShareableListenTogetherStreamResolution(
+        streamUrls = streamUrls.toList(),
+        isPreviewOnly = false
+    )
 }
 
 private fun String.toLocalPlaybackUri(): Uri? {
@@ -420,13 +644,72 @@ internal fun PlayerManager.shouldAttemptUrlRefresh(
     isOfflineCache: Boolean
 ): Boolean {
     if (song == null) return false
-    if (isYouTubeMusicTrack(song)) {
+    return shouldAttemptCachedPlaybackRepair(
+        error = error,
+        isOfflineCache = isOfflineCache,
+        isYouTubeTrack = isYouTubeMusicTrack(song),
+        isLocalSong = isLocalSong(song)
+    )
+}
+
+internal fun shouldAttemptCachedPlaybackRepair(
+    error: PlaybackException,
+    isOfflineCache: Boolean,
+    isYouTubeTrack: Boolean,
+    isLocalSong: Boolean
+): Boolean {
+    if (isOfflineCache) return true
+    if (isLocalSong) return false
+    if (isYouTubeTrack) {
         return shouldAttemptYouTubePlaybackRecovery(error, isOfflineCache)
     }
-    if (isLocalSong(song)) return false
-    if (isOfflineCache) return false
+    return isRecoverableRemotePlaybackCacheError(error)
+}
+
+internal fun shouldInvalidateCachedResourceForPlaybackRecovery(
+    error: PlaybackException
+): Boolean = isRecoverableRemotePlaybackCacheError(error)
+
+internal fun shouldInvalidateCacheForPlaybackRecovery(
+    error: PlaybackException,
+    isOfflineCache: Boolean
+): Boolean {
+    return shouldInvalidateCachedResourceForPlaybackRecovery(error) ||
+        (isOfflineCache && isRecoverableCachedMediaFormatError(error))
+}
+
+internal fun shouldInvalidateCacheAfterPlaybackFailure(
+    shouldInvalidateCache: Boolean,
+    isOfflineCache: Boolean
+): Boolean = shouldInvalidateCache && !isOfflineCache
+
+internal fun isRecoverableRemotePlaybackCacheError(error: PlaybackException): Boolean {
     return error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+        error.errorCode == PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE ||
+        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+        error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE ||
+        error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+        (
+            error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT &&
+                !shouldTreatPlaybackFailureAsTrackEnd(error)
+            )
+}
+
+internal fun shouldTreatPlaybackFailureAsTrackEnd(error: PlaybackException): Boolean {
+    return error.stuckPlayerExceptionOrNull()?.stuckType ==
+        StuckPlayerException.STUCK_PLAYING_NOT_ENDING
+}
+
+internal fun shouldAdvanceAfterStuckTrackEnd(
+    error: PlaybackException,
+    playbackRequested: Boolean
+): Boolean = playbackRequested && shouldTreatPlaybackFailureAsTrackEnd(error)
+
+private fun PlaybackException.stuckPlayerExceptionOrNull(): StuckPlayerException? {
+    return generateSequence(cause) { it.cause }
+        .filterIsInstance<StuckPlayerException>()
+        .firstOrNull()
 }
 
 internal fun PlayerManager.youtubePlaybackRecoveryStrategyForError(
@@ -501,11 +784,14 @@ private fun isRecoverableYouTubeRemotePlaybackError(error: PlaybackException): B
         error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
         error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE ||
         error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
-        error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT ||
-        isRecoverableYouTubeFormatError(error)
+        (
+            error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT &&
+                !shouldTreatPlaybackFailureAsTrackEnd(error)
+            ) ||
+        isRecoverableCachedMediaFormatError(error)
 }
 
-private fun isRecoverableYouTubeFormatError(error: PlaybackException): Boolean {
+private fun isRecoverableCachedMediaFormatError(error: PlaybackException): Boolean {
     return error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
         error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
         error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
@@ -529,6 +815,7 @@ private fun PlayerManager.resumePlaybackFallback(
         if (resumePlaybackAfterRefresh) {
             applyAudioFocusPolicyOnMainThread()
             player.play()
+            startProgressUpdates()
             schedulePlaybackStartupWatchdog(reason = "refresh_fallback")
         } else {
             player.pause()
@@ -678,7 +965,8 @@ private suspend fun PlayerManager.runRefreshOperation(
         semantics.cacheKeyToInvalidateBeforeResolve?.let { staleCacheKey ->
             invalidateCachedResourceBeforeResolve(
                 cacheKey = staleCacheKey,
-                reason = semantics.reason
+                reason = semantics.reason,
+                shouldApplyMutation = { canApplyRefreshResult(semantics, song) }
             )
         }
         val result = resolveSongUrl(
@@ -686,7 +974,8 @@ private suspend fun PlayerManager.runRefreshOperation(
             forceRefresh = isYouTubeMusicTrack(song),
             youtubeRecoveryStrategy = semantics.youtubeRecoveryStrategy,
             sideEffects = RefreshResolverSideEffects(refreshSideEffectGate(semantics, song)),
-            playbackRequestTokenOverride = semantics.requestGeneration
+            playbackRequestTokenOverride = semantics.requestGeneration,
+            shouldApplyCacheMutation = { canApplyRefreshResult(semantics, song) }
         )
         deferred.complete(result)
         handleRefreshResult(semantics, song, result)
@@ -775,6 +1064,7 @@ private suspend fun PlayerManager.handleRefreshResult(
                         if (semantics.resumePlaybackAfterRefresh) {
                             applyAudioFocusPolicyOnMainThread()
                             player.play()
+                            startProgressUpdates()
                         } else {
                             player.pause()
                         }
@@ -866,24 +1156,46 @@ private suspend fun PlayerManager.applyResolvedMediaItem(
         result = result,
         resumePositionMs = resumePositionMs,
         commandSource = semantics.resumedPlaybackCommandSource ?: PlaybackCommandSource.LOCAL,
-        resetRecoveryAttempts = !semantics.reason.startsWith("startup_stall_")
+        resetRecoveryAttempts = !semantics.reason.startsWith("startup_stall_") &&
+            !semantics.reason.startsWith("runtime_stall_")
     )
     val selectedCandidate = currentPlaybackCandidate()
     val selectedUrl = selectedCandidate?.url ?: result.url
-    invalidateMismatchedCachedResource(
+    val selectedAudioInfo = resolvePlaybackAudioInfoForListenTogetherStreamCandidate(
+        candidate = selectedCandidate,
+        resolvedAudioInfo = audioInfo,
+        existingAudioInfo = _currentPlaybackAudioInfo.value
+    )
+    val selectedMimeType = selectedCandidate?.mimeType ?: mimeType
+    val selectedExpectedContentLength =
+        selectedCandidate?.expectedContentLength ?: expectedContentLength
+    val selectedRepresentationIdentity =
+        selectedCandidate?.representationIdentity ?: result.representationIdentity
+    val cacheSynchronization = synchronizeCachedPlaybackDescriptor(
         cacheKey = cacheKey,
-        expectedContentLength = expectedContentLength,
+        audioInfo = selectedAudioInfo,
+        expectedContentLength = selectedExpectedContentLength,
+        representationIdentity = selectedRepresentationIdentity,
         shouldApplyMutation = { gate.runMutation {} }
     )
-    val mediaItem = buildMediaItem(song, selectedUrl, cacheKey, mimeType)
+    if (!gate.runMutation {}) return false
+    val mediaItem = buildMediaItem(
+        song = song,
+        url = selectedUrl,
+        cacheKey = cacheKey,
+        mimeType = selectedMimeType,
+        allowCustomCacheKey = cacheSynchronization.allowsCustomCacheKey()
+    )
 
     if (!gate.runMutation { _currentMediaUrl.value = selectedUrl }) return false
-    if (!gate.runMutation { _currentPlaybackAudioInfo.value = audioInfo }) return false
+    if (!gate.runMutation { _currentPlaybackAudioInfo.value = selectedAudioInfo }) return false
     if (!gate.runMutation { currentMediaUrlResolvedAtMs = SystemClock.elapsedRealtime() }) return false
     if (!gate.runSuspendingMutation { persistState() }) return false
 
     var applied = false
     withContext(Dispatchers.Main) {
+        val observedPositionBelongsToRequestedMedia =
+            loadedMediaRequestToken == semantics.requestGeneration
         if (!gate.runMutation {
                 updateAudioOffloadPreferences("refreshed_stream_source")
             }
@@ -905,7 +1217,8 @@ private suspend fun PlayerManager.applyResolvedMediaItem(
             requestedResumePositionMs = resumePositionMs,
             observedPlaybackPositionMs = _playbackPositionMs.value,
             requestedPositionGeneration = semantics.positionGeneration,
-            currentPositionGeneration = playbackPositionGeneration
+            currentPositionGeneration = playbackPositionGeneration,
+            observedPositionBelongsToRequestedMedia = observedPositionBelongsToRequestedMedia
         )
         if (startPositionMs > 0) {
             if (!gate.runMutation {
@@ -922,6 +1235,7 @@ private suspend fun PlayerManager.applyResolvedMediaItem(
                 if (resumePlaybackAfterRefresh) {
                     applyAudioFocusPolicyOnMainThread()
                     player.play()
+                    startProgressUpdates()
                     schedulePlaybackStartupWatchdog(reason = "refresh_applied")
                 } else {
                     player.pause()
@@ -985,50 +1299,90 @@ private fun PlayerManager.checkLocalCache(
     )
 }
 
-internal fun PlayerManager.checkExoPlayerCache(cacheKey: String): Boolean {
+internal fun PlayerManager.inspectExoPlayerCache(
+    cacheKey: String
+): CachedResourceIntegrity {
+    val mediaCache = cache ?: return CachedResourceIntegrity(false, false, 0L)
     return try {
-        if (!isCacheInitialized()) return false
+        val cachedSpans = mediaCache.getCachedSpans(cacheKey)
+        if (cachedSpans.isEmpty()) {
+            return CachedResourceIntegrity(false, false, 0L)
+        }
 
-        val cachedSpans = cache.getCachedSpans(cacheKey)
-        if (cachedSpans.isEmpty()) return false
-
-        val contentLength = ContentMetadata.getContentLength(cache.getContentMetadata(cacheKey))
+        val contentLength = ContentMetadata.getContentLength(
+            mediaCache.getContentMetadata(cacheKey)
+        )
         if (contentLength <= 0L) {
             NPLogger.d("NERI-PlayerManager", "缓存命中但缺少内容长度，视为未完成缓存: $cacheKey")
-            return false
+            return CachedResourceIntegrity(false, false, 0L)
         }
 
-        val orderedSpans = cachedSpans.sortedBy { it.position }
-        var coveredUntil = 0L
-        for (span in orderedSpans) {
-            if (span.position > coveredUntil) {
-                NPLogger.d(
-                    "NERI-PlayerManager",
-                    "缓存存在空洞，视为未完成缓存: $cacheKey @ ${span.position}"
-                )
-                return false
-            }
-            coveredUntil = maxOf(coveredUntil, span.position + span.length)
-            if (coveredUntil >= contentLength) break
-        }
+        val integrity = inspectCachedResourceSpans(cachedSpans, contentLength)
+        when {
+            integrity.requiresRepair -> NPLogger.w(
+                "NERI-PlayerManager",
+                "缓存 span 文件缺失或长度异常，标记为损坏: key=$cacheKey, " +
+                    "covered=${integrity.coveredLength}/$contentLength"
+            )
 
-        val isComplete = coveredUntil >= contentLength
-        if (isComplete) {
-            NPLogger.d(
+            integrity.isComplete -> NPLogger.d(
                 "NERI-PlayerManager",
                 "缓存完整可用: $cacheKey, length=$contentLength, spans=${cachedSpans.size}"
             )
-        } else {
-            NPLogger.d(
+
+            else -> NPLogger.d(
                 "NERI-PlayerManager",
-                "缓存未完整覆盖: $cacheKey, covered=$coveredUntil/$contentLength"
+                "缓存未完整覆盖: $cacheKey, " +
+                    "covered=${integrity.coveredLength}/$contentLength"
             )
         }
-
-        isComplete
+        integrity
     } catch (e: Exception) {
         NPLogger.w("NERI-PlayerManager", "检查缓存完整性失败: ${e.message}")
-        false
+        CachedResourceIntegrity(false, true, 0L)
+    }
+}
+
+internal fun PlayerManager.hasCompleteExoPlayerCache(cacheKey: String): Boolean {
+    return inspectExoPlayerCache(cacheKey).isComplete
+}
+
+internal suspend fun PlayerManager.prepareExoPlayerCacheForPrefetch(
+    cacheKey: String,
+    shouldApplyMutation: () -> Boolean = { true }
+): CachePrefetchReadiness {
+    val currentCache = cache ?: return CachePrefetchReadiness.UNAVAILABLE
+
+    if (loadPlaybackCacheKeySafety(cacheKey)) {
+        if (cache !== currentCache) return CachePrefetchReadiness.UNAVAILABLE
+        return if (
+            invalidateCachedResourceForPlaybackRecovery(
+                cacheKey = cacheKey,
+                reason = "prefetch_unsafe_cache_key",
+                shouldApplyMutation = shouldApplyMutation
+            )
+        ) {
+            CachePrefetchReadiness.READY_FOR_PREFETCH
+        } else {
+            CachePrefetchReadiness.UNAVAILABLE
+        }
+    }
+
+    val integrity = inspectExoPlayerCache(cacheKey)
+    if (cache !== currentCache) return CachePrefetchReadiness.UNAVAILABLE
+    if (integrity.isComplete) return CachePrefetchReadiness.COMPLETE
+    if (!integrity.requiresRepair) return CachePrefetchReadiness.READY_FOR_PREFETCH
+
+    return if (
+        invalidateCachedResourceForPlaybackRecovery(
+            cacheKey = cacheKey,
+            reason = "prefetch_integrity_check",
+            shouldApplyMutation = shouldApplyMutation
+        )
+    ) {
+        CachePrefetchReadiness.READY_FOR_PREFETCH
+    } else {
+        CachePrefetchReadiness.UNAVAILABLE
     }
 }
 
@@ -1038,14 +1392,14 @@ internal suspend fun PlayerManager.invalidateMismatchedCachedResource(
     shouldApplyMutation: () -> Boolean = { true }
 ) = withContext(Dispatchers.IO) {
     val expectedLength = expectedContentLength?.takeIf { it > 0L } ?: return@withContext
-    if (!isCacheInitialized()) return@withContext
+    val mediaCache = cache ?: return@withContext
 
     try {
-        val cachedSpans = cache.getCachedSpans(cacheKey)
+        val cachedSpans = mediaCache.getCachedSpans(cacheKey)
         if (cachedSpans.isEmpty()) return@withContext
 
         val cachedContentLength = ContentMetadata.getContentLength(
-            cache.getContentMetadata(cacheKey)
+            mediaCache.getContentMetadata(cacheKey)
         )
         if (!shouldReplaceCachedPreviewResource(cachedContentLength, expectedLength)) {
             return@withContext
@@ -1056,7 +1410,7 @@ internal suspend fun PlayerManager.invalidateMismatchedCachedResource(
             "缓存疑似预览片段，移除旧缓存以便重新拉取完整资源: key=$cacheKey, cached=$cachedContentLength, expected=$expectedLength"
         )
         if (!shouldApplyMutation()) return@withContext
-        cache.removeResource(cacheKey)
+        mediaCache.removeResource(cacheKey)
     } catch (e: Exception) {
         NPLogger.w(
             "NERI-PlayerManager",
@@ -1065,36 +1419,87 @@ internal suspend fun PlayerManager.invalidateMismatchedCachedResource(
     }
 }
 
-private suspend fun PlayerManager.invalidateCachedResourceBeforeResolve(
+internal fun PlayerManager.currentPlaybackCacheKeyForRecovery(): String? {
+    offlineCacheKeyFromUrl(_currentMediaUrl.value)?.let { return it }
+
+    if (isPlayerInitialized()) {
+        player.currentMediaItem?.localConfiguration?.customCacheKey
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+    }
+
+    val song = _currentSongFlow.value ?: return null
+    if (isLocalSong(song)) return null
+    return currentPlaybackCandidate()?.cacheKeyOverride
+        ?.takeIf { it.isNotBlank() }
+        ?: computeCacheKey(song).takeIf { it.isNotBlank() }
+}
+
+internal suspend fun PlayerManager.invalidateCachedResourceForPlaybackRecovery(
     cacheKey: String,
-    reason: String
-) = withContext(Dispatchers.IO) {
-    if (!isCacheInitialized()) return@withContext
+    reason: String,
+    shouldApplyMutation: () -> Boolean = { true }
+): Boolean = withContext(Dispatchers.IO) {
+    if (cacheKey.isBlank()) return@withContext false
+    val mediaCache = cache ?: return@withContext false
+    if (cache !== mediaCache || !shouldApplyMutation()) return@withContext false
     try {
-        cache.removeResource(cacheKey)
+        if (cache !== mediaCache || !shouldApplyMutation()) return@withContext false
+        mediaCache.removeResource(cacheKey)
+        if (cache !== mediaCache) return@withContext false
+        if (mediaCache.getCachedSpans(cacheKey).isNotEmpty()) {
+            markPlaybackCacheKeyUnsafe(mediaCache, cacheKey)
+            NPLogger.w(
+                "NERI-PlayerManager",
+                "异常播放缓存未完全移除: key=$cacheKey, reason=$reason"
+            )
+            return@withContext false
+        }
+        if (cache !== mediaCache || !shouldApplyMutation()) return@withContext false
+        if (!clearPlaybackCacheKeyUnsafe(mediaCache, cacheKey)) {
+            NPLogger.w(
+                "NERI-PlayerManager",
+                "异常播放缓存标记未清除，跳过缓存复用: key=$cacheKey, reason=$reason"
+            )
+            return@withContext false
+        }
         NPLogger.w(
             "NERI-PlayerManager",
             "已移除异常播放缓存: key=$cacheKey, reason=$reason"
         )
+        true
     } catch (e: Exception) {
+        if (cache === mediaCache) {
+            markPlaybackCacheKeyUnsafe(mediaCache, cacheKey)
+        }
         NPLogger.w(
             "NERI-PlayerManager",
             "移除异常播放缓存失败: key=$cacheKey, reason=$reason, error=${e.message}"
         )
+        false
     }
 }
+
+private suspend fun PlayerManager.invalidateCachedResourceBeforeResolve(
+    cacheKey: String,
+    reason: String,
+    shouldApplyMutation: () -> Boolean
+) = invalidateCachedResourceForPlaybackRecovery(cacheKey, reason, shouldApplyMutation)
 
 private suspend fun PlayerManager.getNeteaseSongUrl(
     song: SongItem,
     suppressError: Boolean = false,
     sideEffects: RefreshResolverSideEffects = RefreshResolverSideEffects(),
-    allowLocalFallback: Boolean = true
+    allowLocalFallback: Boolean = true,
+    allowPreviewFallback: Boolean = true,
+    allowAutoBiliFallback: Boolean = true
 ): SongUrlResult = withContext(Dispatchers.IO) {
     try {
         val effectiveQuality = effectiveNeteaseQuality()
         val qualityCandidates = buildNeteaseQualityCandidates(effectiveQuality)
         var previewFallback: SongUrlResult.Success? = null
         var lastFailureReason: NeteasePlaybackResponseParser.FailureReason? = null
+        var requiresLogin = false
 
         for ((index, quality) in qualityCandidates.withIndex()) {
             val resp = neteaseClient.getSongDownloadUrl(
@@ -1105,7 +1510,19 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
 
             when (val parsed = NeteasePlaybackResponseParser.parsePlayback(resp, song.durationMs)) {
                 is NeteasePlaybackResponseParser.PlaybackResult.RequiresLogin -> {
-                    return@withContext SongUrlResult.RequiresLogin
+                    requiresLogin = true
+                    if (shouldRetryNeteaseWithLowerQualityAfterLogin(
+                            qualityIndex = index,
+                            lastQualityIndex = qualityCandidates.lastIndex
+                        )
+                    ) {
+                        NPLogger.w(
+                            "NERI-PlayerManager",
+                            "当前音质需要登录，继续尝试更低音质: id=${song.id}, level=$quality"
+                        )
+                        continue
+                    }
+                    break
                 }
 
                 is NeteasePlaybackResponseParser.PlaybackResult.Success -> {
@@ -1114,7 +1531,18 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
                         resolvedQualityKey = quality,
                         fallbackDurationMs = song.durationMs,
                         getLocalizedString = { getLocalizedString(it) }
-                    )
+                    ).let { result ->
+                        if (parsed.notice == NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP) {
+                            result.copy(
+                                cacheKeyOverride = buildNeteasePreviewCacheKey(
+                                    songId = song.id,
+                                    preferredQuality = quality
+                                )
+                            )
+                        } else {
+                            result
+                        }
+                    }
                     if (parsed.notice != NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP) {
                         if (quality != effectiveQuality) {
                             NPLogger.w(
@@ -1159,12 +1587,20 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
                     return@withContext it
                 }
             }
-            tryResolveNeteaseAutoBiliSource(song, sideEffects)?.let {
-                return@withContext it
+            if (allowAutoBiliFallback) {
+                tryResolveNeteaseAutoBiliSource(song, sideEffects)?.let {
+                    return@withContext it
+                }
             }
         }
 
-        previewFallback?.let { return@withContext it }
+        if (allowPreviewFallback) {
+            previewFallback?.let { return@withContext it }
+        }
+
+        if (requiresLogin) {
+            return@withContext SongUrlResult.RequiresLogin
+        }
 
         if (!suppressError) {
             val messageRes = when (lastFailureReason) {
@@ -1258,9 +1694,11 @@ private suspend fun PlayerManager.getBiliAudioUrl(
                 url = audioStream.url,
                 candidateUrls = audioStream.candidateUrls,
                 mimeType = audioStream.mimeType,
+                expectedContentLength = null,
                 audioInfo = buildBiliPlaybackAudioInfo(audioStream, availableStreams) {
                     getLocalizedString(it)
-                }
+                },
+                representationIdentity = buildBiliRepresentationIdentity(audioStream)
             )
         } else {
             if (!suppressError) {
@@ -1430,6 +1868,7 @@ private suspend fun PlayerManager.getYouTubeMusicAudioUrl(
                 audioInfo = buildYouTubePlaybackAudioInfo(resolvedPlayableAudio) {
                     getLocalizedString(it)
                 },
+                representationIdentity = buildYouTubeRepresentationIdentity(resolvedPlayableAudio),
                 cacheKeyOverride = youtubeRecoveryStrategy?.let { strategy ->
                     computeYouTubeCacheKey(
                         videoId = videoId,

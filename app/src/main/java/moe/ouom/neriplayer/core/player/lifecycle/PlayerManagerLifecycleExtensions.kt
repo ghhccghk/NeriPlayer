@@ -15,7 +15,7 @@ import androidx.compose.material.icons.filled.BluetoothAudio
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.SpeakerGroup
 import androidx.compose.material.icons.filled.Usb
-import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -23,12 +23,16 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.cache.Cache.CacheException
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -40,60 +44,38 @@ import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.core.di.AppContainer.biliCookieRepo
 import moe.ouom.neriplayer.core.di.AppContainer.settingsRepo
+import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.core.lyricon.LyriconManager
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.core.player.audio.focus.StartupAudioFocusController
-import moe.ouom.neriplayer.core.player.effects.AudioReactive
-import moe.ouom.neriplayer.core.player.engine.PlaybackVolumeNormalizationState
-import moe.ouom.neriplayer.core.player.engine.ReactiveRenderersFactory
-import moe.ouom.neriplayer.core.player.engine.datasource.ConditionalHttpDataSourceFactory
-import moe.ouom.neriplayer.core.player.service.AudioPlayerService
-import moe.ouom.neriplayer.core.player.lyrics.FloatingLyricsOverlayManager
-import moe.ouom.neriplayer.core.player.usb.system.UsbExclusiveSystemSoundGuard
-import moe.ouom.neriplayer.core.player.lyrics.clearExternalBluetoothLyricLine
-import moe.ouom.neriplayer.core.player.lyrics.syncExternalBluetoothLyrics
-import moe.ouom.neriplayer.core.player.lyrics.syncExternalTranslatedLyrics
-import moe.ouom.neriplayer.core.player.lyrics.updateExternalBluetoothLyricLine
 import moe.ouom.neriplayer.core.player.audio.isBluetoothOutputType
 import moe.ouom.neriplayer.core.player.audio.isHeadsetLikeOutput
 import moe.ouom.neriplayer.core.player.audio.isUsbOutputType
 import moe.ouom.neriplayer.core.player.audio.isWiredOutputType
 import moe.ouom.neriplayer.core.player.audio.requiresDisconnectConfirmation
-import moe.ouom.neriplayer.core.player.debug.UsbExclusiveDiagnostics
 import moe.ouom.neriplayer.core.player.debug.UsbExclusiveDebugLogger
+import moe.ouom.neriplayer.core.player.debug.UsbExclusiveDiagnostics
 import moe.ouom.neriplayer.core.player.debug.playWhenReadyChangeReasonName
+import moe.ouom.neriplayer.core.player.debug.playbackSuppressionReasonName
 import moe.ouom.neriplayer.core.player.debug.playbackStateName
+import moe.ouom.neriplayer.core.player.effects.AudioReactive
+import moe.ouom.neriplayer.core.player.engine.PlaybackVolumeNormalizationState
+import moe.ouom.neriplayer.core.player.engine.ReactiveRenderersFactory
+import moe.ouom.neriplayer.core.player.engine.datasource.ConditionalHttpDataSourceFactory
+import moe.ouom.neriplayer.core.player.lyrics.FloatingLyricsOverlayManager
+import moe.ouom.neriplayer.core.player.lyrics.clearExternalBluetoothLyricLine
+import moe.ouom.neriplayer.core.player.lyrics.syncExternalBluetoothLyrics
+import moe.ouom.neriplayer.core.player.lyrics.syncExternalTranslatedLyrics
+import moe.ouom.neriplayer.core.player.lyrics.updateExternalBluetoothLyricLine
+import moe.ouom.neriplayer.core.player.metadata.PlayerLyricsProvider
 import moe.ouom.neriplayer.core.player.model.AudioDevice
 import moe.ouom.neriplayer.core.player.model.PlaybackAudioSource
 import moe.ouom.neriplayer.core.player.model.PlayerEvent
-import moe.ouom.neriplayer.core.player.metadata.PlayerLyricsProvider
-import moe.ouom.neriplayer.core.player.policy.command.PlaybackCommandSource
-import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRMATION_SAMPLE_COUNT
-import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRM_INITIAL_DELAY_MS
-import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRM_SAMPLE_INTERVAL_MS
-import moe.ouom.neriplayer.core.player.policy.audio.shouldConfirmBluetoothDisconnect
-import moe.ouom.neriplayer.core.player.policy.offload.requiresPcmAudioProcessing
-import moe.ouom.neriplayer.core.player.policy.offload.shouldUpdateAudioOffloadForReactiveChange
-import moe.ouom.neriplayer.core.player.policy.wake.PlaybackTransitionWakeLock
-import moe.ouom.neriplayer.core.player.policy.usb.evaluateUsbExclusiveKeepAliveProgress
-import moe.ouom.neriplayer.core.player.policy.usb.USB_EXCLUSIVE_DEFERRED_RUNTIME_REFRESH_RETRY_DELAY_MS
-import moe.ouom.neriplayer.core.player.policy.usb.UsbExclusiveForegroundRecoveryAction
-import moe.ouom.neriplayer.core.player.policy.usb.resolveUsbExclusiveForegroundRecoveryAction
-import moe.ouom.neriplayer.core.player.policy.usb.shouldRetryUsbExclusiveDeferredRuntimeRefresh
-import moe.ouom.neriplayer.core.player.policy.usb.shouldRestoreUsbExclusiveForegroundPlaybackIntent
-import moe.ouom.neriplayer.core.player.policy.pending.shouldAcceptPlayerCallback
-import moe.ouom.neriplayer.core.player.policy.pending.shouldExposePlayerCallbackState
-import moe.ouom.neriplayer.core.player.policy.usb.shouldSkipUsbExclusiveRouteRebuildForManualPlayback
-import moe.ouom.neriplayer.core.player.policy.usb.shouldStopUsbExclusivePlaybackForNoisyRoute
-import moe.ouom.neriplayer.core.player.policy.usb.shouldDeferUsbExclusiveNoisyRouteToNativePath
-import moe.ouom.neriplayer.core.player.policy.usb.shouldResumeUsbExclusivePlaybackAfterDeviceAttach
-import moe.ouom.neriplayer.core.player.policy.usb.resolveUsbExclusiveInterruptedPlaybackQueueIndex
-import moe.ouom.neriplayer.core.player.policy.usb.isTransientUsbExclusiveOpenGate
-import moe.ouom.neriplayer.core.player.policy.usb.shouldApplyActiveUsbBufferResize
-import moe.ouom.neriplayer.core.player.policy.usb.shouldDeferUsbExclusiveRecoveryForPendingReconfiguration
-import moe.ouom.neriplayer.core.player.policy.usb.shouldSkipRedundantUsbExclusiveReconfiguration
-import moe.ouom.neriplayer.core.player.playlist.PlayerFavoritesController
-import moe.ouom.neriplayer.core.player.policy.command.shouldClearResumePlaybackRequestOnPlayWhenReadyPause
+import moe.ouom.neriplayer.core.player.persistence.RestoredPlayerStateSnapshot
+import moe.ouom.neriplayer.core.player.persistence.applyRestoredStateSnapshot
+import moe.ouom.neriplayer.core.player.persistence.restoreState
+import moe.ouom.neriplayer.core.player.persistence.scheduleStatePersist
+import moe.ouom.neriplayer.core.player.playback.PlaybackStatsTracker
 import moe.ouom.neriplayer.core.player.playback.advanceAfterPlaybackFailure
 import moe.ouom.neriplayer.core.player.playback.clearAudioRouteMuteSuppression
 import moe.ouom.neriplayer.core.player.playback.pauseForAudioRouteLoss
@@ -103,38 +85,222 @@ import moe.ouom.neriplayer.core.player.playback.playImpl
 import moe.ouom.neriplayer.core.player.playback.restorePlaybackAfterTransientAudioRouteLoss
 import moe.ouom.neriplayer.core.player.playback.startProgressUpdates
 import moe.ouom.neriplayer.core.player.playback.suppressPlaybackForAudioRouteLoss
-import moe.ouom.neriplayer.core.player.playback.PlaybackStatsTracker
+import moe.ouom.neriplayer.core.player.playlist.PlayerFavoritesController
+import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRMATION_SAMPLE_COUNT
+import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRM_INITIAL_DELAY_MS
+import moe.ouom.neriplayer.core.player.policy.audio.BLUETOOTH_DISCONNECT_CONFIRM_SAMPLE_INTERVAL_MS
+import moe.ouom.neriplayer.core.player.policy.audio.shouldConfirmBluetoothDisconnect
+import moe.ouom.neriplayer.core.player.policy.command.PlaybackCommandSource
+import moe.ouom.neriplayer.core.player.policy.command.shouldClearResumePlaybackRequestOnPlayWhenReadyPause
+import moe.ouom.neriplayer.core.player.policy.command.shouldResumeSilentlyForListenTogetherNoisyPause
+import moe.ouom.neriplayer.core.player.policy.offload.requiresPcmAudioProcessing
+import moe.ouom.neriplayer.core.player.policy.offload.shouldUpdateAudioOffloadForReactiveChange
+import moe.ouom.neriplayer.core.player.policy.pending.shouldAcceptPlayerCallback
+import moe.ouom.neriplayer.core.player.policy.pending.shouldExposePlayerCallbackState
+import moe.ouom.neriplayer.core.player.policy.usb.USB_EXCLUSIVE_DEFERRED_RUNTIME_REFRESH_RETRY_DELAY_MS
+import moe.ouom.neriplayer.core.player.policy.usb.UsbExclusiveForegroundRecoveryAction
+import moe.ouom.neriplayer.core.player.policy.usb.evaluateUsbExclusiveKeepAliveProgress
+import moe.ouom.neriplayer.core.player.policy.usb.isTransientUsbExclusiveOpenGate
+import moe.ouom.neriplayer.core.player.policy.usb.resolveUsbExclusiveForegroundRecoveryAction
+import moe.ouom.neriplayer.core.player.policy.usb.resolveUsbExclusiveInterruptedPlaybackQueueIndex
+import moe.ouom.neriplayer.core.player.policy.usb.shouldApplyActiveUsbBufferResize
+import moe.ouom.neriplayer.core.player.policy.usb.shouldDeferUsbExclusiveNoisyRouteToNativePath
+import moe.ouom.neriplayer.core.player.policy.usb.shouldDeferUsbExclusiveRecoveryForPendingReconfiguration
+import moe.ouom.neriplayer.core.player.policy.usb.shouldRestoreUsbExclusiveForegroundPlaybackIntent
+import moe.ouom.neriplayer.core.player.policy.usb.shouldResumeUsbExclusivePlaybackAfterDeviceAttach
+import moe.ouom.neriplayer.core.player.policy.usb.shouldRetryUsbExclusiveDeferredRuntimeRefresh
+import moe.ouom.neriplayer.core.player.policy.usb.shouldSkipRedundantUsbExclusiveReconfiguration
+import moe.ouom.neriplayer.core.player.policy.usb.shouldSkipUsbExclusiveRouteRebuildForManualPlayback
+import moe.ouom.neriplayer.core.player.policy.usb.shouldStopUsbExclusivePlaybackForNoisyRoute
+import moe.ouom.neriplayer.core.player.policy.wake.PlaybackTransitionWakeLock
 import moe.ouom.neriplayer.core.player.prefetch.prefetchNextGenericTrackUrl
-import moe.ouom.neriplayer.core.player.persistence.RestoredPlayerStateSnapshot
-import moe.ouom.neriplayer.core.player.persistence.applyRestoredStateSnapshot
-import moe.ouom.neriplayer.core.player.persistence.restoreState
-import moe.ouom.neriplayer.core.player.persistence.scheduleStatePersist
 import moe.ouom.neriplayer.core.player.resolver.youtube.YouTubeSeekRefreshPolicy
-import moe.ouom.neriplayer.core.player.url.offlineCacheKeyFromUrl
+import moe.ouom.neriplayer.core.player.service.AudioPlayerService
+import moe.ouom.neriplayer.listentogether.playback.shouldMuteListenTogetherListenerForOutputDisconnect
+import moe.ouom.neriplayer.core.player.url.currentPlaybackCacheKeyForRecovery
+import moe.ouom.neriplayer.core.player.url.invalidateCachedResourceForPlaybackRecovery
+import moe.ouom.neriplayer.core.player.url.shouldAdvanceAfterStuckTrackEnd
 import moe.ouom.neriplayer.core.player.url.shouldAttemptUrlRefresh
+import moe.ouom.neriplayer.core.player.url.shouldInvalidateCacheAfterPlaybackFailure
+import moe.ouom.neriplayer.core.player.url.shouldInvalidateCacheForPlaybackRecovery
+import moe.ouom.neriplayer.core.player.url.shouldTreatPlaybackFailureAsTrackEnd
 import moe.ouom.neriplayer.core.player.url.youtubePlaybackRecoveryStrategyForError
-import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathTracker
 import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathState
+import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathTracker
 import moe.ouom.neriplayer.core.player.usb.session.UsbExclusiveSessionController
 import moe.ouom.neriplayer.core.player.usb.session.UsbExclusiveWakeLock
+import moe.ouom.neriplayer.core.player.usb.system.UsbExclusiveSystemSoundGuard
 import moe.ouom.neriplayer.core.player.usb.transport.UsbExclusiveErrorCode
 import moe.ouom.neriplayer.core.player.usb.transport.UsbExclusiveNativeState
 import moe.ouom.neriplayer.core.player.usb.transport.isRecoverableTransportFailure
 import moe.ouom.neriplayer.core.player.usb.transport.usbExclusiveErrorCode
 import moe.ouom.neriplayer.core.player.usb.transport.usbRuntimeMetrics
-import moe.ouom.neriplayer.data.model.sameIdentityAs
 import moe.ouom.neriplayer.core.player.watchdog.cancelPlaybackStartupWatchdog
 import moe.ouom.neriplayer.core.player.watchdog.clearActivePlaybackCandidates
+import moe.ouom.neriplayer.core.player.watchdog.resetPlaybackRuntimeWatchdog
+import moe.ouom.neriplayer.core.player.watchdog.schedulePlaybackRuntimeWatchdog
 import moe.ouom.neriplayer.core.player.watchdog.schedulePlaybackStartupWatchdog
 import moe.ouom.neriplayer.core.player.watchdog.trySwitchToNextPlaybackCandidateForRecovery
-import moe.ouom.neriplayer.data.settings.PlaybackPreferenceSnapshot
+import moe.ouom.neriplayer.data.model.sameIdentityAs
 import moe.ouom.neriplayer.data.settings.AutoSettingsSchema
+import moe.ouom.neriplayer.data.settings.CacheSizePolicy
+import moe.ouom.neriplayer.data.settings.PlaybackPreferenceSnapshot
 import moe.ouom.neriplayer.data.settings.UsbExclusivePreferences
 import moe.ouom.neriplayer.data.settings.readPlaybackPreferenceSnapshotSync
 import moe.ouom.neriplayer.data.settings.toUsbExclusivePreferences
-import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.util.platform.readBackgroundBehaviorAllowance
 import java.io.File
+
+private const val MEDIA_CACHE_DIRECTORY_NAME = "media_cache"
+
+private fun PlayerManager.logPlaybackStateTransition(event: String) {
+    val playerSnapshot = if (isPlayerInitialized()) {
+        val positionMs = runCatching { player.currentPosition.coerceAtLeast(0L) }
+            .getOrDefault(-1L)
+        val bufferedMs = runCatching { player.totalBufferedDuration }
+            .getOrDefault(-1L)
+        "state=${playbackStateName(player.playbackState)}, " +
+            "isPlaying=${player.isPlaying}, playWhenReady=${player.playWhenReady}, " +
+            "suppression=${playbackSuppressionReasonName(player.playbackSuppressionReason)}, " +
+            "positionMs=$positionMs, bufferedMs=$bufferedMs"
+    } else {
+        "state=UNINITIALIZED"
+    }
+    NPLogger.d(
+        "NERI-PlaybackState",
+        "event=$event, requestToken=$playbackRequestToken, " +
+            "loadedToken=$loadedMediaRequestToken, " +
+            "resumeRequested=$resumePlaybackRequested, " +
+            "pending=${isPendingMediaLoadActive()}, " +
+            "routeMute=${audioRouteMuteSuppressedFlow.value}, $playerSnapshot"
+    )
+}
+
+private fun Throwable.playbackDiagnosticSummary(): String {
+    return message
+        ?.replace(Regex("https?://\\S+"), "<redacted-url>")
+        ?.replace('\n', ' ')
+        ?.take(240)
+        .orEmpty()
+}
+
+private fun Throwable.isSimpleCacheFolderLocked(): Boolean {
+    return generateSequence(this) { it.cause }
+        .any { cause ->
+            cause.message?.contains(
+                "Another SimpleCache instance uses the folder",
+                ignoreCase = true
+            ) == true
+        }
+}
+
+private fun Throwable.hasCacheInitializationFailure(): Boolean {
+    return generateSequence(this) { it.cause }
+        .any { it is CacheException }
+}
+
+internal fun shouldRebuildMediaCacheAfterInitializationFailure(error: Throwable): Boolean {
+    return !error.isSimpleCacheFolderLocked() && error.hasCacheInitializationFailure()
+}
+
+internal fun isMediaCacheDirectorySafeToOpen(cacheDir: File): Boolean {
+    return !cacheDir.exists() ||
+        (cacheDir.isDirectory && cacheDir.listFiles()?.isEmpty() == true)
+}
+
+private fun createVerifiedMediaCache(
+    app: Application,
+    maxCacheSize: Long,
+    databaseProvider: StandaloneDatabaseProvider
+): SimpleCache? {
+    val cacheDir = File(app.cacheDir, MEDIA_CACHE_DIRECTORY_NAME)
+
+    fun openCache(): SimpleCache {
+        val cacheEvictor = if (
+            maxCacheSize == CacheSizePolicy.UNLIMITED_CACHE_SIZE_BYTES
+        ) {
+            NoOpCacheEvictor()
+        } else {
+            LeastRecentlyUsedCacheEvictor(maxCacheSize)
+        }
+        val createdCache = SimpleCache(
+            cacheDir,
+            cacheEvictor,
+            databaseProvider
+        )
+        return try {
+            createdCache.checkInitialization()
+            createdCache
+        } catch (error: Exception) {
+            runCatching { createdCache.release() }
+            throw error
+        }
+    }
+
+    val firstAttempt = runCatching { openCache() }
+    firstAttempt.getOrNull()?.let { return it }
+
+    val firstError = firstAttempt.exceptionOrNull() ?: return null
+    if (
+        firstError.isSimpleCacheFolderLocked() ||
+            SimpleCache.isCacheFolderLocked(cacheDir)
+    ) {
+        NPLogger.w(
+            "NERI-PlayerManager",
+            "media cache is already locked; continue without cache for this process",
+            firstError
+        )
+        return null
+    }
+
+    if (!shouldRebuildMediaCacheAfterInitializationFailure(firstError)) {
+        NPLogger.w(
+            "NERI-PlayerManager",
+            "media cache initialization failed outside the cache store; playback will bypass cache",
+            firstError
+        )
+        return null
+    }
+
+    NPLogger.w(
+        "NERI-PlayerManager",
+        "media cache initialization failed; rebuilding the cache directory",
+        firstError
+    )
+    val removedBrokenCache = runCatching {
+        SimpleCache.delete(cacheDir, databaseProvider)
+        isMediaCacheDirectorySafeToOpen(cacheDir)
+    }.onFailure { deleteError ->
+        NPLogger.w(
+            "NERI-PlayerManager",
+            "failed to remove broken media cache; playback will bypass cache",
+            deleteError
+        )
+    }.getOrDefault(false)
+    if (!removedBrokenCache) {
+        NPLogger.w(
+            "NERI-PlayerManager",
+            "broken media cache could not be removed completely; playback will bypass cache"
+        )
+        return null
+    }
+
+    return runCatching { openCache() }
+        .onFailure { error ->
+            NPLogger.w(
+                "NERI-PlayerManager",
+                "rebuilt media cache is unavailable; playback will bypass cache",
+                error
+            )
+        }
+        .getOrNull()
+}
+
+internal fun PlayerManager.releaseMediaCache() {
+    val mediaCache = cache
+    cache = null
+    mediaCache?.release()
+}
 
 internal fun PlayerManager.initializeImpl(
     app: Application,
@@ -153,16 +319,17 @@ internal fun PlayerManager.initializeImpl(
         }
         initializationInProgress = true
     }
+    val effectiveMaxCacheSize = CacheSizePolicy.normalizeCacheSizeBytes(maxCacheSize)
     try {
         runCatching {
             NPLogger.d(
                 "NERI-PlayerManager",
-                "initialize(): maxCacheSize=$maxCacheSize, app=${app.packageName}, stack=[${debugStackHint()}]"
+                "initialize(): maxCacheSize=$effectiveMaxCacheSize, app=${app.packageName}, stack=[${debugStackHint()}]"
             )
             application = app
             _localPlaylistsReadyFlow.value = false
             FloatingLyricsOverlayManager.initialize(app)
-            currentCacheSize = maxCacheSize
+            currentCacheSize = effectiveMaxCacheSize
 
             ioScope = newIoScope()
             mainScope = newMainScope()
@@ -249,29 +416,48 @@ internal fun PlayerManager.initializeImpl(
         )
         conditionalHttpFactory = conditionalFactory
 
-        val finalDataSourceFactory: androidx.media3.datasource.DataSource.Factory = if (maxCacheSize > 0) {
-            val cacheDir = File(app.cacheDir, "media_cache")
+        val finalDataSourceFactory: androidx.media3.datasource.DataSource.Factory = if (
+            effectiveMaxCacheSize > 0 ||
+                effectiveMaxCacheSize == CacheSizePolicy.UNLIMITED_CACHE_SIZE_BYTES
+        ) {
             val dbProvider = StandaloneDatabaseProvider(app)
-
-            cache = SimpleCache(
-                cacheDir,
-                LeastRecentlyUsedCacheEvictor(maxCacheSize),
-                dbProvider
+            val mediaCache = createVerifiedMediaCache(
+                app = app,
+                maxCacheSize = effectiveMaxCacheSize,
+                databaseProvider = dbProvider
             )
+            if (mediaCache == null) {
+                cache = null
+                androidx.media3.datasource.DefaultDataSource.Factory(app, conditionalFactory)
+            } else {
+                cache = mediaCache
+                val cacheDsFactory = CacheDataSource.Factory()
+                    .setCache(mediaCache)
+                    .setUpstreamDataSourceFactory(conditionalFactory)
+                    .setFlags(
+                        CacheDataSource.FLAG_BLOCK_ON_CACHE or
+                            CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
+                    )
+                    .setEventListener(object : CacheDataSource.EventListener {
+                        override fun onCachedBytesRead(
+                            cacheSizeBytes: Long,
+                            cachedBytesRead: Long
+                        ) {
+                            AppContainer.trafficStatsRepo.recordCacheHitBytes(cachedBytesRead)
+                        }
 
-            val cacheDsFactory = CacheDataSource.Factory()
-                .setCache(cache)
-                .setUpstreamDataSourceFactory(conditionalFactory)
-                .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
-                .setEventListener(object : CacheDataSource.EventListener {
-                    override fun onCachedBytesRead(cacheSizeBytes: Long, cachedBytesRead: Long) {
-                        AppContainer.trafficStatsRepo.recordCacheHitBytes(cachedBytesRead)
-                    }
+                        override fun onCacheIgnored(reason: Int) {
+                            if (reason == CacheDataSource.CACHE_IGNORED_REASON_ERROR) {
+                                NPLogger.w(
+                                    "NERI-PlayerManager",
+                                    "cache read failed; bypassing cache for the next data source cycle"
+                                )
+                            }
+                        }
+                    })
 
-                    override fun onCacheIgnored(reason: Int) = Unit
-                })
-
-            androidx.media3.datasource.DefaultDataSource.Factory(app, cacheDsFactory)
+                androidx.media3.datasource.DefaultDataSource.Factory(app, cacheDsFactory)
+            }
         } else {
             NPLogger.d("NERI-Player", "Cache disabled by user setting (size=0).")
             androidx.media3.datasource.DefaultDataSource.Factory(app, conditionalFactory)
@@ -289,12 +475,87 @@ internal fun PlayerManager.initializeImpl(
             playbackHighResolutionOutputEnabled && !usbExclusivePlaybackEnabled
         val renderersFactory = ReactiveRenderersFactory(app)
             .setEnableAudioFloatOutput(enableFloatOutput)
+            // 硬解初始化失败时允许 Media3 尝试低优先级的兼容解码器
+            .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
 
         player = ExoPlayer.Builder(app, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(buildAudioLoadControl())
             .build()
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: Format,
+                decoderReuseEvaluation: DecoderReuseEvaluation?
+            ) {
+                NPLogger.i(
+                    "NERI-PlaybackDecoder",
+                    "audio input format: sampleMimeType=${format.sampleMimeType}, " +
+                        "containerMimeType=${format.containerMimeType}, codecs=${format.codecs}, " +
+                        "sampleRate=${format.sampleRate}, channels=${format.channelCount}, " +
+                        "pcmEncoding=${format.pcmEncoding}"
+                )
+            }
+
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                NPLogger.i(
+                    "NERI-PlaybackDecoder",
+                    "audio decoder initialized: name=$decoderName, " +
+                        "durationMs=$initializationDurationMs"
+                )
+            }
+
+            override fun onAudioUnderrun(
+                eventTime: AnalyticsListener.EventTime,
+                bufferSize: Int,
+                bufferSizeMs: Long,
+                elapsedSinceLastFeedMs: Long
+            ) {
+                NPLogger.w(
+                    "NERI-PlaybackDecoder",
+                    "audio underrun: bufferSize=$bufferSize, bufferMs=$bufferSizeMs, " +
+                        "elapsedSinceFeedMs=$elapsedSinceLastFeedMs"
+                )
+            }
+
+            override fun onAudioSinkError(
+                eventTime: AnalyticsListener.EventTime,
+                audioSinkError: Exception
+            ) {
+                NPLogger.e(
+                    "NERI-PlaybackDecoder",
+                    "audio sink error: type=${audioSinkError::class.java.simpleName}, " +
+                        "message=${audioSinkError.playbackDiagnosticSummary()}"
+                )
+            }
+
+            override fun onAudioCodecError(
+                eventTime: AnalyticsListener.EventTime,
+                audioCodecError: Exception
+            ) {
+                NPLogger.e(
+                    "NERI-PlaybackDecoder",
+                    "audio codec error: type=${audioCodecError::class.java.simpleName}, " +
+                        "message=${audioCodecError.playbackDiagnosticSummary()}"
+                )
+            }
+
+            override fun onAudioDecoderReleased(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String
+            ) {
+                NPLogger.i(
+                    "NERI-PlaybackDecoder",
+                    "audio decoder released: name=$decoderName"
+                )
+            }
+        })
         applyInitialPlaybackWakeMode()
         _playbackSoundState.value = playbackEffectsController.attachPlayer(player)
         applyPlaybackSoundConfig(playbackSoundConfig, persist = false)
@@ -344,7 +605,6 @@ internal fun PlayerManager.initializeImpl(
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 NPLogger.e("NERI-Player", "onPlayerError: ${error.errorCodeName}", error)
-                cancelPlaybackStartupWatchdog(reason = "player_error")
 
                 if (!shouldAcceptPlayerCallback(
                         playbackRequestToken,
@@ -359,15 +619,40 @@ internal fun PlayerManager.initializeImpl(
                     return
                 }
 
+                cancelPlaybackStartupWatchdog(reason = "player_error")
+                resetPlaybackRuntimeWatchdog(reason = "player_error")
+
+                if (shouldAdvanceAfterStuckTrackEnd(error, resumePlaybackRequested)) {
+                    NPLogger.w(
+                        "NERI-PlayerManager",
+                        "Media3 reported a track that did not end; advance the queue without invalidating cache"
+                    )
+                    handleTrackEndedIfNeeded(source = "media3_stuck_playing_not_ending")
+                    return
+                }
+                if (shouldTreatPlaybackFailureAsTrackEnd(error)) {
+                    NPLogger.d(
+                        "NERI-PlayerManager",
+                        "Ignore track-end timeout because playback is no longer requested"
+                    )
+                    return
+                }
+
                 val currentSong = _currentSongFlow.value
                 val currentUrl = _currentMediaUrl.value
                 val isOfflineCache = currentUrl?.startsWith("http://offline.cache/") == true
+                val shouldInvalidateCache =
+                    shouldInvalidateCacheForPlaybackRecovery(error, isOfflineCache)
 
                 val cause = error.cause
                 val shouldResumeAfterRecovery = resumePlaybackRequested || player.playWhenReady || player.isPlaying
                 if (
                     shouldResumeAfterRecovery &&
-                    trySwitchToNextPlaybackCandidateForRecovery(reason = "player_error_${error.errorCodeName}")
+                    trySwitchToNextPlaybackCandidateForRecovery(
+                        reason = "player_error_${error.errorCodeName}",
+                        invalidateCurrentCache = shouldInvalidateCache,
+                        expectedRequestToken = playbackRequestToken
+                    )
                 ) {
                     return
                 }
@@ -378,8 +663,8 @@ internal fun PlayerManager.initializeImpl(
                         song = currentSong,
                         isOfflineCache = isOfflineCache
                     )
-                    val cacheKeyToInvalidateBeforeResolve = if (youtubeRecoveryStrategy != null) {
-                        offlineCacheKeyFromUrl(currentUrl)
+                    val cacheKeyToInvalidateBeforeResolve = if (shouldInvalidateCache) {
+                        currentPlaybackCacheKeyForRecovery()
                     } else {
                         null
                     }
@@ -454,6 +739,18 @@ internal fun PlayerManager.initializeImpl(
                     pause()
                 } else {
                     mainScope.launch {
+                        if (shouldInvalidateCacheAfterPlaybackFailure(
+                                shouldInvalidateCache = shouldInvalidateCache,
+                                isOfflineCache = isOfflineCache
+                            )
+                        ) {
+                            currentPlaybackCacheKeyForRecovery()?.let { cacheKey ->
+                                invalidateCachedResourceForPlaybackRecovery(
+                                    cacheKey = cacheKey,
+                                    reason = "unrecoverable_playback_${error.errorCodeName}"
+                                )
+                            }
+                        }
                         advanceAfterPlaybackFailure(
                             source = "playback_error_${error.errorCodeName}"
                         )
@@ -474,9 +771,11 @@ internal fun PlayerManager.initializeImpl(
                     )
                     return
                 }
+                logPlaybackStateTransition("playback_state_changed:${playbackStateName(state)}")
                 _playerPlaybackStateFlow.value = state
                 if (state == Player.STATE_BUFFERING && player.playWhenReady) {
                     schedulePlaybackStartupWatchdog(reason = "state_buffering")
+                    schedulePlaybackRuntimeWatchdog(reason = "state_buffering")
                 }
                 if (state == Player.STATE_READY) {
                     val accepted = shouldAcceptPlayerCallback(
@@ -491,18 +790,48 @@ internal fun PlayerManager.initializeImpl(
                     if (player.playWhenReady || player.isPlaying) {
                         startProgressUpdates()
                         schedulePlaybackStartupWatchdog(reason = "state_ready")
+                        schedulePlaybackRuntimeWatchdog(reason = "state_ready")
                     }
                 }
                 if (state == Player.STATE_ENDED) {
-                    cancelPlaybackStartupWatchdog(reason = "state_ended")
                     if (shouldAcceptPlayerCallback(
                             playbackRequestToken,
                             loadedMediaRequestToken,
                             isPendingMediaLoadActive()
                         )
                     ) {
+                        cancelPlaybackStartupWatchdog(reason = "state_ended")
+                        resetPlaybackRuntimeWatchdog(reason = "state_ended")
                         handleTrackEndedIfNeeded(source = "playback_state_changed")
                     }
+                }
+            }
+
+            override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+                if (!isPlayerInitialized()) return
+                if (!shouldExposePlayerCallbackState(
+                        playbackRequestToken,
+                        loadedMediaRequestToken,
+                        isPendingMediaLoadActive()
+                    )
+                ) {
+                    NPLogger.d(
+                        "NERI-PlayerManager",
+                        "Ignoring stale playback suppression callback during pending media load: " +
+                            "requestToken=$playbackRequestToken, " +
+                            "loadedToken=$loadedMediaRequestToken, " +
+                            "suppression=${playbackSuppressionReasonName(playbackSuppressionReason)}"
+                    )
+                    return
+                }
+                logPlaybackStateTransition(
+                    "playback_suppression_changed:" +
+                        playbackSuppressionReasonName(playbackSuppressionReason)
+                )
+                if (playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
+                    resetPlaybackRuntimeWatchdog(reason = "playback_suppression_entered")
+                } else if (player.playWhenReady && playbackProgressAdvanceReported) {
+                    schedulePlaybackRuntimeWatchdog(reason = "suppression_cleared")
                 }
             }
 
@@ -515,6 +844,7 @@ internal fun PlayerManager.initializeImpl(
                 ) {
                     return
                 }
+                logPlaybackStateTransition("is_playing_changed:$isPlaying")
                 _isPlayingFlow.value = isPlaying
                 LyriconManager.setPlaybackState(isPlaying)
                 if (!isPlaying) {
@@ -526,8 +856,12 @@ internal fun PlayerManager.initializeImpl(
                 if (isPlaying) {
                     startProgressUpdates()
                     schedulePlaybackStartupWatchdog(reason = "is_playing_true")
-                } else if (!player.playWhenReady) {
+                    schedulePlaybackRuntimeWatchdog(reason = "is_playing_true")
+                } else if (player.playWhenReady) {
+                    schedulePlaybackRuntimeWatchdog(reason = "is_playing_false")
+                } else {
                     stopProgressUpdates()
+                    resetPlaybackRuntimeWatchdog(reason = "is_playing_false_without_intent")
                 }
                 val positionMs = resolveDisplayedPlaybackPosition(player.currentPosition)
                 val shouldResumePlayback = shouldResumePlaybackSnapshot()
@@ -550,19 +884,47 @@ internal fun PlayerManager.initializeImpl(
                     )
                     return
                 }
+                logPlaybackStateTransition(
+                    "play_when_ready_changed:$playWhenReady:" +
+                        playWhenReadyChangeReasonName(reason)
+                )
                 _playWhenReadyFlow.value = playWhenReady
                 if (playWhenReady) {
                     startProgressUpdates()
                     schedulePlaybackStartupWatchdog(reason = "play_when_ready_true")
-                } else if (!player.isPlaying) {
+                    schedulePlaybackRuntimeWatchdog(reason = "play_when_ready_true")
+                } else {
                     cancelPlaybackStartupWatchdog(reason = "play_when_ready_false")
-                    stopProgressUpdates()
+                    resetPlaybackRuntimeWatchdog(reason = "play_when_ready_false")
+                    if (!player.isPlaying) {
+                        stopProgressUpdates()
+                    }
                 }
                 if (!playWhenReady) {
                     NPLogger.d(
                         "NERI-PlayerManager",
                         "playWhenReady=false, reason=${playWhenReadyChangeReasonName(reason)}, state=${playbackStateName(player.playbackState)}, mediaId=${player.currentMediaItem?.mediaId}, stack=[${debugStackHint()}]"
                     )
+                    if (shouldResumeSilentlyForListenTogetherNoisyPause(
+                            playWhenReady = playWhenReady,
+                            playWhenReadyChangeReason = reason,
+                            muteListenTogetherListenerForAudioRouteLoss =
+                                shouldMuteListenTogetherListenerForAudioRouteLoss()
+                        )
+                    ) {
+                        NPLogger.d(
+                            "NERI-PlayerManager",
+                            "restore Listen Together listener playWhenReady after noisy route by muting locally"
+                        )
+                        suppressPlaybackForAudioRouteLoss(
+                            reason = "listen_together_exoplayer_becoming_noisy"
+                        )
+                        playImpl(
+                            commandSource = PlaybackCommandSource.LOCAL_SAFETY,
+                            allowFadeIn = false
+                        )
+                        return
+                    }
                     if (
                         shouldClearResumePlaybackRequestOnPlayWhenReadyPause(
                             playWhenReady = playWhenReady,
@@ -573,6 +935,12 @@ internal fun PlayerManager.initializeImpl(
                     ) {
                         updateResumePlaybackRequested(false)
                     }
+                }
+                if (!playWhenReady && !resumePlaybackRequested) {
+                    PlaybackTransitionWakeLock.release(
+                        playbackRequestToken,
+                        "play_when_ready_false"
+                    )
                 }
                 if (
                     !playWhenReady &&
@@ -590,6 +958,9 @@ internal fun PlayerManager.initializeImpl(
 
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
                 maybeBackfillCurrentSongDurationFromPlayer()
+                if (timeline.isEmpty) {
+                    resetPlaybackRuntimeWatchdog(reason = "timeline_empty")
+                }
                 if (player.playWhenReady || player.isPlaying) {
                     startProgressUpdates()
                 }
@@ -597,6 +968,7 @@ internal fun PlayerManager.initializeImpl(
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 PlaybackVolumeNormalizationState.resetForNewTrack()
+                resetPlaybackRuntimeWatchdog(reason = "media_item_transition")
                 _playbackPositionMs.value = player.currentPosition.coerceAtLeast(0L)
                 maybeBackfillCurrentSongDurationFromPlayer()
                 if (player.playWhenReady || player.isPlaying) {
@@ -753,8 +1125,7 @@ internal fun PlayerManager.initializeImpl(
                         LyriconManager.setPosition(_playbackPositionMs.value)
                     }
                 } else {
-                    lyriconUpdateJob?.cancel()
-                    lyriconUpdateJob = null
+                    cancelLyriconUpdate()
                 }
             }
         }
@@ -842,12 +1213,14 @@ internal fun PlayerManager.initializeImpl(
             settingsRepo.cloudMusicLyricDefaultOffsetMsFlow.collect { offsetMs ->
                 cloudMusicLyricDefaultOffsetMs = offsetMs
                 updateExternalBluetoothLyricLine(_playbackPositionMs.value)
+                updateLyriconLyricOffset()
             }
         }
         ioScope.launch {
             settingsRepo.qqMusicLyricDefaultOffsetMsFlow.collect { offsetMs ->
                 qqMusicLyricDefaultOffsetMs = offsetMs
                 updateExternalBluetoothLyricLine(_playbackPositionMs.value)
+                updateLyriconLyricOffset()
             }
         }
         ioScope.launch {
@@ -957,12 +1330,26 @@ internal fun PlayerManager.initializeImpl(
         }
         ioScope.launch {
             settingsRepo.neteaseAutoSourceSwitchFlow.collect { enabled ->
+                val previousEnabled = neteaseAutoSourceSwitchEnabled
                 neteaseAutoSourceSwitchEnabled = enabled
+                if (!previousEnabled && enabled) {
+                    scheduleQualityRefresh(
+                        source = PlaybackAudioSource.NETEASE,
+                        reason = "netease_auto_source_switch_enabled"
+                    )
+                }
             }
         }
         ioScope.launch {
             settingsRepo.neteaseLocalSourceFallbackFlow.collect { enabled ->
+                val previousEnabled = neteaseLocalSourceFallbackEnabled
                 neteaseLocalSourceFallbackEnabled = enabled
+                if (!previousEnabled && enabled) {
+                    scheduleQualityRefresh(
+                        source = PlaybackAudioSource.NETEASE,
+                        reason = "netease_local_source_fallback_enabled"
+                    )
+                }
             }
         }
         ioScope.launch {
@@ -1025,12 +1412,12 @@ internal fun PlayerManager.initializeImpl(
         initialized = true
         NPLogger.d(
             "NERI-PlayerManager",
-            "initialize(): success, cacheSize=$maxCacheSize, restoredQueueSize=${currentPlaylist.size}, currentIndex=$currentIndex, currentDevice=${_currentAudioDevice.value?.type}:${_currentAudioDevice.value?.name}"
+            "initialize(): success, cacheSize=$effectiveMaxCacheSize, restoredQueueSize=${currentPlaylist.size}, currentIndex=$currentIndex, currentDevice=${_currentAudioDevice.value?.type}:${_currentAudioDevice.value?.name}"
         )
     }.onFailure { e ->
         NPLogger.e(
             "NERI-PlayerManager",
-            "initialize(): failed, cacheSize=$maxCacheSize, currentPlaylistSize=${currentPlaylist.size}, currentIndex=$currentIndex",
+            "initialize(): failed, cacheSize=$effectiveMaxCacheSize, currentPlaylistSize=${currentPlaylist.size}, currentIndex=$currentIndex",
             e
         )
         NPLogger.w(
@@ -1067,10 +1454,8 @@ internal fun PlayerManager.initializeImpl(
             NPLogger.w("NERI-PlayerManager", "initialize(): rollback release effects failed: ${it.message}")
         }
         runCatching {
-            if (isCacheInitialized()) {
-                cache.release()
-                NPLogger.d("NERI-PlayerManager", "initialize(): rollback released cache")
-            }
+            releaseMediaCache()
+            NPLogger.d("NERI-PlayerManager", "initialize(): rollback released cache")
         }.onFailure {
             NPLogger.w("NERI-PlayerManager", "initialize(): rollback release cache failed: ${it.message}")
         }
@@ -1107,30 +1492,17 @@ internal suspend fun PlayerManager.clearCacheImpl(
 ): Pair<Boolean, String> {
     return kotlinx.coroutines.withContext(Dispatchers.IO) {
         var apiRemovedCount = 0
-        var physicalDeletedCount = 0
-        var totalSpaceFreed = 0L
 
         try {
             if (clearAudio) {
-                if (isCacheInitialized()) {
-                    val keysSnapshot = HashSet(cache.keys)
+                val mediaCache = cache
+                if (mediaCache != null) {
+                    val keysSnapshot = HashSet(mediaCache.keys)
                     keysSnapshot.forEach { key ->
                         try {
-                            val resource = cache.getCachedSpans(key)
-                            resource.forEach { totalSpaceFreed += it.length }
-                            cache.removeResource(key)
+                            mediaCache.removeResource(key)
                             apiRemovedCount++
                         } catch (_: Exception) {
-                        }
-                    }
-                }
-
-                val cacheDir = File(application.cacheDir, "media_cache")
-                if (cacheDir.exists() && cacheDir.isDirectory) {
-                    val files = cacheDir.listFiles() ?: emptyArray()
-                    files.forEach { file ->
-                        if (file.isFile && file.name.endsWith(".exo") && file.delete()) {
-                            physicalDeletedCount++
                         }
                     }
                 }
@@ -1148,10 +1520,10 @@ internal suspend fun PlayerManager.clearCacheImpl(
 
             NPLogger.d(
                 "NERI-Player",
-                "Cache Clear: API removed $apiRemovedCount keys, Physically deleted $physicalDeletedCount .exo files."
+                "Cache Clear: removed $apiRemovedCount resources through SimpleCache."
             )
 
-            val msg = if (physicalDeletedCount > 0 || apiRemovedCount > 0 || clearImage) {
+            val msg = if (apiRemovedCount > 0 || clearImage) {
                 getLocalizedString(R.string.cache_clear_complete)
             } else {
                 getLocalizedString(R.string.settings_cache_empty)
@@ -1256,6 +1628,9 @@ private fun PlayerManager.setupAudioDeviceCallback() {
                 audioManager = audioManager,
                 usbTopologyChanged = removedDevices?.any {
                     it.isSink && isUsbOutputType(it.type)
+                } == true,
+                outputDeviceRemoved = removedDevices?.any {
+                    it.isSink && isHeadsetLikeOutput(it.type)
                 } == true
             )
         }
@@ -1273,6 +1648,14 @@ internal fun PlayerManager.handleAudioBecomingNoisyImpl(): Boolean {
     }
     val currentDevice = _currentAudioDevice.value
     val playbackActive = _isPlayingFlow.value || _playWhenReadyFlow.value || resumePlaybackRequested
+    if (shouldMuteListenTogetherListenerForAudioRouteLoss()) {
+        NPLogger.d(
+            "NERI-PlayerManager",
+            "handleAudioBecomingNoisy(): mute Listen Together listener without pausing"
+        )
+        suppressPlaybackForAudioRouteLoss(reason = "listen_together_becoming_noisy")
+        return true
+    }
     val nativeState = UsbExclusiveSessionController.state.value
     val nativePlayerPcmActive = nativeState.opened && nativeState.source == "player_pcm"
     if (
@@ -1317,8 +1700,10 @@ internal fun PlayerManager.handleAudioBecomingNoisyImpl(): Boolean {
         }
         NPLogger.d(
             "NERI-PlayerManager",
-            "handleAudioBecomingNoisy(): schedule delayed pause for device=${currentDevice.type}:${currentDevice.name}"
+            "handleAudioBecomingNoisy(): mute while confirming disconnect for " +
+                "device=${currentDevice.type}:${currentDevice.name}"
         )
+        suppressPlaybackForAudioRouteLoss(reason = "bluetooth_disconnect_pending")
         schedulePauseForBluetoothDisconnect(
             previousDevice = currentDevice,
             reason = "becoming_noisy"
@@ -1355,7 +1740,8 @@ private fun PlayerManager.stopPlaybackAfterUsbExclusiveNoisyRoute(currentDevice:
 
 private fun PlayerManager.handleDeviceChange(
     audioManager: AudioManager,
-    usbTopologyChanged: Boolean
+    usbTopologyChanged: Boolean,
+    outputDeviceRemoved: Boolean = false
 ) {
     val previousDevice = _currentAudioDevice.value
     val newDevice = getCurrentAudioDevice(audioManager)
@@ -1365,6 +1751,27 @@ private fun PlayerManager.handleDeviceChange(
         previousDevice.name != newDevice.name
     val nativeOpenGate = UsbExclusiveSessionController.playerPcmOpenGateReason()
     val nextRouteIsUsbOutput = isUsbOutputType(newDevice.type)
+    val listenTogetherOutputDisconnected =
+        shouldMuteListenTogetherListenerForOutputDisconnect(
+            listenTogetherActive = isListenTogetherActive(),
+            isCurrentUserController = isCurrentUserControllerInListenTogether(),
+            previousRouteWasHeadsetLike =
+                previousDevice?.type?.let(::isHeadsetLikeOutput) == true,
+            newRouteIsBuiltinSpeaker =
+                newDevice.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+            outputDeviceRemoved = outputDeviceRemoved,
+            routeChanged = usbRouteChanged
+        )
+    if (listenTogetherOutputDisconnected) {
+        bluetoothDisconnectPauseJob?.cancel()
+        bluetoothDisconnectPauseJob = null
+        NPLogger.d(
+            "NERI-PlayerManager",
+            "Detected Listen Together listener output disconnect " +
+                "(${previousDevice?.type} -> ${newDevice.type}), muting without pausing."
+        )
+        suppressPlaybackForAudioRouteLoss(reason = "listen_together_output_disconnect")
+    }
     if (
         usbExclusivePlaybackEnabled &&
         nativeOpenGate?.contains("usb_device_detached", ignoreCase = true) == true &&
@@ -1440,6 +1847,7 @@ private fun PlayerManager.handleDeviceChange(
         "NERI-PlayerManager",
         "handleDeviceChange(): ${previousDevice?.type}:${previousDevice?.name} -> ${newDevice.type}:${newDevice.name}, isPlaying=${_isPlayingFlow.value}"
     )
+    if (listenTogetherOutputDisconnected) return
     if (shouldPauseForBluetoothDisconnect(previousDevice, newDevice)) {
         schedulePauseForBluetoothDisconnect(
             previousDevice = previousDevice,
@@ -3543,6 +3951,7 @@ internal fun PlayerManager.releaseImpl() {
         updateResumePlaybackRequested(false)
         lastAutoTrackAdvanceAtMs = 0L
         cancelPlaybackStartupWatchdog(reason = "release")
+        resetPlaybackRuntimeWatchdog(reason = "release")
         clearActivePlaybackCandidates()
         StartupAudioFocusController.release("player_release")
 
@@ -3556,7 +3965,10 @@ internal fun PlayerManager.releaseImpl() {
 
         stopProgressUpdates()
         cancelVolumeFade(resetToFull = true)
-        clearAudioRouteMuteSuppression(reason = "release")
+        clearAudioRouteMuteSuppression(
+            reason = "release",
+            preserveExplicitRestore = false
+        )
         cancelPendingPauseRequest(resetVolumeToFull = true)
         bluetoothDisconnectPauseJob?.cancel()
         bluetoothDisconnectPauseJob = null
@@ -3593,8 +4005,7 @@ internal fun PlayerManager.releaseImpl() {
         currentGenericUrlPrefetchJob = null
         currentGenericUrlPrefetchKey = null
         genericUrlPrefetchCache.clear()
-        lyriconUpdateJob?.cancel()
-        lyriconUpdateJob = null
+        cancelLyriconUpdate()
         externalBluetoothLyricsLoadJob?.cancel()
         externalBluetoothLyricsLoadJob = null
         externalBluetoothTranslationLoadJob?.cancel()
@@ -3620,9 +4031,7 @@ internal fun PlayerManager.releaseImpl() {
         _playbackSoundState.value = playbackEffectsController.release()
         _playWhenReadyFlow.value = false
         _playerPlaybackStateFlow.value = Player.STATE_IDLE
-        if (isCacheInitialized()) {
-            cache.release()
-        }
+        releaseMediaCache()
         conditionalHttpFactory?.close()
         conditionalHttpFactory = null
 

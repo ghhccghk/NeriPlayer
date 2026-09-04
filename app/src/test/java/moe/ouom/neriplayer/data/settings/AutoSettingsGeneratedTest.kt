@@ -364,6 +364,28 @@ class AutoSettingsGeneratedTest {
     }
 
     @Test
+    fun playbackFadeInSettingUsesPlaybackMetadata() {
+        val metadata = AutoSettingsMetadata.requireSetting(SettingsKeys.PLAYBACK_FADE_IN)
+
+        assertEquals("playback_fade_in", metadata.keyName)
+        assertEquals(SettingValueType.Boolean, metadata.valueType)
+        assertEquals(SettingUiType.Custom, metadata.ui)
+        assertEquals(SettingAccessMode.KeyOnly, metadata.access)
+        assertEquals(AutoSettingsSections.playback, metadata.section)
+    }
+
+    @Test
+    fun playbackCrossfadeNextSettingUsesPlaybackMetadata() {
+        val metadata = AutoSettingsMetadata.requireSetting(SettingsKeys.PLAYBACK_CROSSFADE_NEXT)
+
+        assertEquals("playback_crossfade_next", metadata.keyName)
+        assertEquals(SettingValueType.Boolean, metadata.valueType)
+        assertEquals(SettingUiType.Custom, metadata.ui)
+        assertEquals(SettingAccessMode.KeyOnly, metadata.access)
+        assertEquals(AutoSettingsSections.playback, metadata.section)
+    }
+
+    @Test
     fun exploreSearchHistorySettingDefaultsToEnabled() {
         val setting = AutoSettingsSchema.general.exploreSearchHistoryEnabled
 
@@ -471,6 +493,26 @@ class AutoSettingsGeneratedTest {
             assertEquals(AutoSettingsSections.display, metadata?.section)
             assertEquals(icon, metadata?.icon)
         }
+    }
+
+    @Test
+    fun lyricAppearanceSwitchesUseDistinctDedicatedIcons() {
+        val translation = AutoSettingsSchema.display.showLyricTranslation
+        val phonetic = AutoSettingsSchema.display.lyricTranslationUsePhonetic
+        val otherDisplayIcons = AutoSettingsMetadata
+            .settingsIn(AutoSettingsSections.display)
+            .filter {
+                it.keyName != "show_lyric_translation" &&
+                    it.keyName != "lyric_translation_use_phonetic"
+            }
+            .map { it.icon }
+            .filter { it != AutoSettingIcon.None }
+
+        assertEquals(AutoSettingIcon.Public, translation.icon)
+        assertEquals(AutoSettingIcon.RecordVoiceOver, phonetic.icon)
+        assertTrue(translation.icon !in otherDisplayIcons)
+        assertTrue(phonetic.icon !in otherDisplayIcons)
+        assertNotEquals(translation.icon, phonetic.icon)
     }
 
     @Test
@@ -584,11 +626,11 @@ class AutoSettingsGeneratedTest {
             AutoSettingsSchema.display.showCoverSourceBadge.icon
         )
         assertEquals(
-            AutoSettingIcon.Subtitles,
+            AutoSettingIcon.Public,
             AutoSettingsSchema.display.showLyricTranslation.icon
         )
         assertEquals(
-            AutoSettingIcon.Keyboard,
+            AutoSettingIcon.RecordVoiceOver,
             AutoSettingsSchema.display.lyricTranslationUsePhonetic.icon
         )
         assertEquals(

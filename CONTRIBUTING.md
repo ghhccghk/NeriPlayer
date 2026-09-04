@@ -55,7 +55,7 @@
 - **compileSdk / targetSdk / minSdk**：37 / 36 / 28
 - **NDK**：`27.0.12077973`
 - **CMake**：`3.28.0+`
-- **Node.js**：20，用于一起听 Worker 检查
+- **Node.js**：22，用于一起听 Worker 检查
 - **版本名格式**：`<git短哈希>.<MMddHHmm>`
 - **Release APK 文件名**：`NeriPlayer-<versionName>[-abi].apk`
 
@@ -344,7 +344,7 @@
 
 - `Explore` 是网易精选歌单 + YouTube Music 歌单 + 网易/Bilibili/YouTube Music
   按平台独立搜索，不是混合聚合搜索。
-- `Home` 在中文默认模式下主要展示本地继续播放与网易推荐；
+- `Home` 在中文默认模式下展示本地继续播放、网易云全部可用推荐源和雷达歌单；
   国际化模式下优先展示 YouTube Music 首页货架。
 - `Library` 中 QQ 音乐入口仍为占位，不代表完整平台接入。
 - 本地艺术家分类来自本地已导入/已保存歌曲的展示艺术家聚合，

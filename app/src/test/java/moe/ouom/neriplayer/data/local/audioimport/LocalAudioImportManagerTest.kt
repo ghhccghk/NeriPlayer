@@ -92,6 +92,76 @@ class LocalAudioImportManagerTest {
     }
 
     @Test
+    fun `copyNearbySidecars preserves translated lyric sidecar`() {
+        val sourceDir = tempFolder.newFolder("source-translated-lyrics")
+        val sourceAudio = File(sourceDir, "song.flac").apply { writeText("audio") }
+        File(sourceDir, "song_trans.lrc").writeText("translated")
+
+        val targetDir = tempFolder.newFolder("imports-translated-lyrics")
+        val targetAudio = File(targetDir, "imported_song.flac").apply { writeText("audio") }
+
+        LocalAudioImportManager.copyNearbySidecars(sourceAudio, targetAudio)
+
+        val copiedTranslated = File(targetDir, "imported_song_trans.lrc")
+        assertTrue(copiedTranslated.exists())
+        assertEquals("translated", copiedTranslated.readText())
+    }
+
+    @Test
+    fun `copyNearbySidecars preserves translated lrc txt suffix`() {
+        val sourceDir = tempFolder.newFolder("source-translated-lrc-txt")
+        val sourceAudio = File(sourceDir, "song.flac").apply { writeText("audio") }
+        File(sourceDir, "song_trans.lrc.txt").writeText("translated")
+
+        val targetDir = tempFolder.newFolder("imports-translated-lrc-txt")
+        val targetAudio = File(targetDir, "imported_song.flac").apply { writeText("audio") }
+
+        LocalAudioImportManager.copyNearbySidecars(sourceAudio, targetAudio)
+
+        val copiedTranslated = File(targetDir, "imported_song_trans.lrc.txt")
+        assertTrue(copiedTranslated.exists())
+        assertEquals("translated", copiedTranslated.readText())
+    }
+
+    @Test
+    fun `copyNearbySidecars preserves romanized lyric sidecar`() {
+        val sourceDir = tempFolder.newFolder("source-romanized-lyrics")
+        val sourceAudio = File(sourceDir, "song.flac").apply { writeText("audio") }
+        File(File(sourceDir, "Lyrics").apply { mkdirs() }, "song_roma.lrc")
+            .writeText("romanized")
+
+        val targetDir = tempFolder.newFolder("imports-romanized-lyrics")
+        val targetAudio = File(targetDir, "imported_song.flac").apply { writeText("audio") }
+
+        LocalAudioImportManager.copyNearbySidecars(sourceAudio, targetAudio)
+
+        val copiedRomanized = File(targetDir, "imported_song_roma.lrc")
+        assertTrue(copiedRomanized.exists())
+        assertEquals("romanized", copiedRomanized.readText())
+    }
+
+    @Test
+    fun `copyNearbySidecars preserves source directory lyric selection priority`() {
+        val sourceDir = tempFolder.newFolder("source-lyrics-priority")
+        val sourceAudio = File(sourceDir, "song.flac").apply { writeText("audio") }
+        File(sourceDir, "song.txt").writeText("source original")
+        File(sourceDir, "song_trans.txt").writeText("source translation")
+        val lyricsDir = File(sourceDir, "Lyrics").apply { mkdirs() }
+        File(lyricsDir, "song.lrc").writeText("nested original")
+        File(lyricsDir, "song_trans.lrc").writeText("nested translation")
+
+        val targetDir = tempFolder.newFolder("imports-lyrics-priority")
+        val targetAudio = File(targetDir, "imported_song.flac").apply { writeText("audio") }
+
+        LocalAudioImportManager.copyNearbySidecars(sourceAudio, targetAudio)
+
+        assertEquals("source original", File(targetDir, "imported_song.txt").readText())
+        assertFalse(File(targetDir, "imported_song.lrc").exists())
+        assertEquals("source translation", File(targetDir, "imported_song_trans.txt").readText())
+        assertFalse(File(targetDir, "imported_song_trans.lrc").exists())
+    }
+
+    @Test
     fun `buildQuickImportedSong falls back to file name and local placeholder metadata`() {
         val importedFile = tempFolder.newFile("001_demo_track.flac")
 
@@ -301,6 +371,53 @@ class LocalAudioImportManagerTest {
         assertEquals(245_000L, merged.durationMs)
         assertEquals("file:///covers/demo.jpg", merged.coverUrl)
         assertEquals("[00:00.00]demo", merged.matchedLyric)
+    }
+
+    @Test
+    fun `mergeImportedSongMetadata keeps quick cover stable during background hydration`() {
+        val quickSong = LocalAudioImportManager.buildQuickImportedSong(
+            seed = QuickImportedSongSeed(
+                sourceRef = "/music/demo.flac",
+                displayName = "demo.flac",
+                title = "Demo",
+                artist = "Artist",
+                album = "Album",
+                durationMs = 180_000L,
+                nearbyCoverUri = "file:///music/demo.jpg"
+            ),
+            unknownArtistLabel = "Unknown Artist"
+        )
+        val detailedSong = quickSong.copy(
+            coverUrl = "file:///data/local_audio_covers/embedded.jpg"
+        )
+
+        val merged = LocalAudioImportManager.mergeImportedSongMetadata(quickSong, detailedSong)
+
+        assertEquals("file:///music/demo.jpg", merged.coverUrl)
+    }
+
+    @Test
+    fun `mergeImportedSongMetadata adopts cover discovered after a coverless quick scan`() {
+        val quickSong = LocalAudioImportManager.buildQuickImportedSong(
+            seed = QuickImportedSongSeed(
+                sourceRef = "content://tree/music/document/demo.flac",
+                displayName = "demo.flac",
+                title = "Demo",
+                artist = "Artist",
+                album = null,
+                durationMs = 180_000L
+            ),
+            unknownArtistLabel = "Unknown Artist"
+        )
+        val detailedSong = quickSong.copy(
+            coverUrl = "file:///data/local_audio_covers/demo.jpg",
+            originalCoverUrl = "file:///data/local_audio_covers/demo.jpg"
+        )
+
+        val merged = LocalAudioImportManager.mergeImportedSongMetadata(quickSong, detailedSong)
+
+        assertEquals("file:///data/local_audio_covers/demo.jpg", merged.coverUrl)
+        assertEquals("file:///data/local_audio_covers/demo.jpg", merged.originalCoverUrl)
     }
 
     @Test

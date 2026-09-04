@@ -492,7 +492,7 @@ object AutoSettingsSchema {
             ui = SettingUiType.Custom
         )
         val homeCardTrending = autoSetting(
-            titleRes = R.string.recommend_trending
+            titleRes = R.string.settings_home_card_netease_trending
         )
 
         @AutoSetting(
@@ -503,7 +503,7 @@ object AutoSettingsSchema {
             ui = SettingUiType.Custom
         )
         val homeCardRadar = autoSetting(
-            titleRes = R.string.recommend_radar
+            titleRes = R.string.settings_home_card_netease_radar
         )
 
         @AutoSetting(
@@ -514,7 +514,7 @@ object AutoSettingsSchema {
             ui = SettingUiType.Custom
         )
         val homeCardRecommended = autoSetting(
-            titleRes = R.string.recommend_for_you
+            titleRes = R.string.settings_home_card_netease_recommended
         )
     }
 
@@ -760,7 +760,7 @@ object AutoSettingsSchema {
         val showLyricTranslation = autoSetting(
             titleRes = R.string.settings_show_lyric_translation,
             descriptionRes = R.string.settings_show_lyric_translation_desc,
-            icon = AutoSettingIcon.Subtitles
+            icon = AutoSettingIcon.Public
         )
 
         @AutoSetting(
@@ -773,7 +773,7 @@ object AutoSettingsSchema {
         val lyricTranslationUsePhonetic = autoSetting(
             titleRes = R.string.lyrics_translation_use_phonetic,
             descriptionRes = R.string.lyrics_translation_use_phonetic_desc,
-            icon = AutoSettingIcon.Keyboard
+            icon = AutoSettingIcon.RecordVoiceOver
         )
     }
 
@@ -967,7 +967,7 @@ object AutoSettingsSchema {
     /*
      * 歌词设置
      *
-     * 放外部词幕适配和各来源默认歌词偏移
+     * 放歌词外观, 外部词幕适配和各来源默认歌词偏移
      * 偏移会影响已有歌曲的用户偏移重算, 所以保留手写入口
      */
     @AutoSettingsSection(
@@ -1502,7 +1502,7 @@ object AutoSettingsSchema {
         @AutoSetting(
             key = "playback_fade_in",
             type = SettingValueType.Boolean,
-            defaultBoolean = false,
+            defaultBoolean = true,
             order = 10,
             ui = SettingUiType.Custom,
             access = SettingAccessMode.KeyOnly
@@ -1515,7 +1515,7 @@ object AutoSettingsSchema {
         @AutoSetting(
             key = "playback_crossfade_next",
             type = SettingValueType.Boolean,
-            defaultBoolean = false,
+            defaultBoolean = true,
             order = 20,
             ui = SettingUiType.Custom,
             access = SettingAccessMode.KeyOnly

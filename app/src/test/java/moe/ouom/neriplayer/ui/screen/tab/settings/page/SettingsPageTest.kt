@@ -45,6 +45,24 @@ class SettingsPageTest {
     }
 
     @Test
+    fun lyricAppearanceSettingsOpenLyricsPage() {
+        listOf(
+            "show_lyric_translation",
+            "lyric_translation_use_phonetic",
+            "lyric_font_scale",
+            "nowplaying_cover_lyric_font_scale",
+            "nowplaying_cover_translation_font_scale",
+            "lyrics_page_lyric_font_scale",
+            "lyrics_page_translation_font_scale"
+        ).forEach { keyName ->
+            val setting = AutoSettingsMetadata.settings.first { it.keyName == keyName }
+
+            assertEquals(AutoSettingsSections.display, setting.section)
+            assertEquals(SettingsPage.Lyrics, setting.settingsPage())
+        }
+    }
+
+    @Test
     fun accountsPageIsPinnedAsTheFirstHomeItem() {
         assertEquals(SettingsPage.Accounts, SettingsHomePageGroups.first().first())
     }
@@ -68,9 +86,18 @@ class SettingsPageTest {
         }
 
         assertEquals(R.string.player_continue, titleRes("home_card_continue"))
-        assertEquals(R.string.recommend_trending, titleRes("home_card_trending"))
-        assertEquals(R.string.recommend_radar, titleRes("home_card_radar"))
-        assertEquals(R.string.recommend_for_you, titleRes("home_card_recommended"))
+        assertEquals(
+            R.string.settings_home_card_netease_trending,
+            titleRes("home_card_trending")
+        )
+        assertEquals(
+            R.string.settings_home_card_netease_radar,
+            titleRes("home_card_radar")
+        )
+        assertEquals(
+            R.string.settings_home_card_netease_recommended,
+            titleRes("home_card_recommended")
+        )
     }
 
     @Test
@@ -280,16 +307,28 @@ class SettingsPageTest {
             5,
             settingsSearchScrollAnchor(
                 page = SettingsPage.Personalization,
-                targetId = "setting:lyrics_page_lyric_font_scale"
-            ).itemIndex
-        )
-        assertEquals(
-            6,
-            settingsSearchScrollAnchor(
-                page = SettingsPage.Personalization,
                 targetId = "setting:background_image_uri"
             ).itemIndex
         )
+    }
+
+    @Test
+    fun lyricsSearchUsesAppearanceCardAnchor() {
+        listOf(
+            "setting:show_lyric_translation",
+            "setting:lyric_translation_use_phonetic",
+            "setting:lyric_font_scale",
+            "setting:lyrics_page_lyric_font_scale",
+            "setting:lyrics_page_translation_font_scale"
+        ).forEach { targetId ->
+            assertEquals(
+                4,
+                settingsSearchScrollAnchor(
+                    page = SettingsPage.Lyrics,
+                    targetId = targetId
+                ).itemIndex
+            )
+        }
     }
 
     @Test
@@ -486,6 +525,25 @@ class SettingsPageTest {
                 it.targetId == "setting:dynamic_island_lyrics_enabled"
             }
         )
+    }
+
+    @Test
+    fun internationalHomeCardTitlesAreSearchable() {
+        val entries = buildSettingsSearchEntries(settingsStringContext())
+        val expectedTargets = listOf(
+            "guess you like" to "setting:home_card_trending",
+            "猜你喜欢" to "setting:home_card_trending",
+            "daily discover" to "setting:home_card_radar",
+            "每日发现" to "setting:home_card_radar",
+            "more recommendations" to "setting:home_card_recommended",
+            "更多推荐" to "setting:home_card_recommended"
+        )
+
+        expectedTargets.forEach { (query, targetId) ->
+            assertTrue(
+                searchSettingsEntries(entries, query).any { it.targetId == targetId }
+            )
+        }
     }
 
     @Test

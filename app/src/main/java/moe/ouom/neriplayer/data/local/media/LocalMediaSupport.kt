@@ -37,6 +37,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract
 import android.system.Os
 import androidx.core.content.FileProvider
 import com.kyant.taglib.Picture
@@ -60,6 +61,7 @@ import moe.ouom.neriplayer.util.network.isFileInsideDirectory
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.RandomAccessFile
@@ -83,6 +85,7 @@ private const val SHARED_LOCAL_MEDIA_DIR = "shared_media_exports"
 private const val LOCAL_COVER_LOOKUP_CACHE_LIMIT = 768
 private const val NEARBY_COVER_LOOKUP_CACHE_LIMIT = 2048
 private const val DIRECTORY_COVER_LOOKUP_CACHE_LIMIT = 256
+private const val LOCAL_LYRICS_LOOKUP_CACHE_LIMIT = 768
 private const val MAX_EDITABLE_COVER_BYTES = 8L * 1024L * 1024L
 private const val FRONT_COVER_PICTURE_TYPE = "Front Cover"
 private val ROLELESS_COVER_PICTURE_EXTENSIONS = setOf(
@@ -93,6 +96,7 @@ private val MP4_SUPPORTED_COVER_MIME_TYPES = setOf(
 )
 private val EDITABLE_COVER_JPEG_QUALITIES = intArrayOf(95, 90, 85, 80, 75, 70, 65, 60)
 private const val STAGED_METADATA_WRITE_DIRECTORY = "staged_metadata_writes"
+private const val LOCAL_METADATA_SUFFIX = ".npmeta.json"
 private val STAGED_CONTENT_REWRITE_EXTENSIONS = setOf(
     "aac", "aif", "aiff", "ape", "flac", "m4a", "m4b", "mp3", "mp4",
     "ogg", "opus", "tta", "wav", "wv"
@@ -131,7 +135,54 @@ data class LocalMediaDetails(
     val originalArtist: String?,
     val embeddedCover: Boolean,
     val sourceStableKey: String? = null,
-    val translatedLyricContent: String? = null
+    val translatedLyricContent: String? = null,
+    val romanizedLyricContent: String? = null
+)
+
+internal data class NearbyLyricFiles(
+    val original: File?,
+    val translated: File?,
+    val romanized: File? = null
+)
+
+internal data class NearbyLyricReferences(
+    val original: String?,
+    val translated: String?,
+    val romanized: String?
+)
+
+internal data class LocalLyricsScanMetadata(
+    val lyric: String?,
+    val translatedLyric: String?,
+    val romanizedLyric: String?
+)
+
+internal data class LocalMetadataSidecar(
+    val reference: String,
+    val hasLyricOverride: Boolean,
+    val hasTranslatedLyricOverride: Boolean,
+    val hasRomanizedLyricOverride: Boolean,
+    val matchedLyric: String?,
+    val matchedTranslatedLyric: String?,
+    val originalLyric: String?,
+    val originalTranslatedLyric: String?,
+    val matchedRomanizedLyric: String?,
+    val originalRomanizedLyric: String?
+) {
+    val lyric: String?
+        get() = matchedLyric ?: originalLyric
+
+    val translatedLyric: String?
+        get() = matchedTranslatedLyric ?: originalTranslatedLyric
+
+    val romanizedLyric: String?
+        get() = matchedRomanizedLyric ?: originalRomanizedLyric
+}
+
+private data class LocalDocumentNavigation(
+    val baseUri: Uri,
+    val treeUri: Uri?,
+    val parentDocumentId: String?
 )
 
 internal enum class EditableCoverMutation {
@@ -181,8 +232,7 @@ private fun SongItem.localMediaUriCandidates(): List<Uri> {
         localFilePath = localFilePath,
         mediaUri = mediaUri
     )
-    return listOf(preferredSource, localFilePath, mediaUri)
-        .filterNotNull()
+    return listOfNotNull(preferredSource, localFilePath, mediaUri)
         .mapNotNull { source ->
             val localUri = if (source.startsWith("/")) {
                 Uri.fromFile(File(source))
@@ -288,14 +338,25 @@ object LocalMediaSupport {
     private val lyricExtensions = listOf("lrc", "txt")
     private val coverFileNames = listOf("cover", "folder", "front")
     private val imageExtensions = listOf("jpg", "jpeg", "png", "webp")
-    private data class LocalCoverCacheHit(val coverUri: String?)
+    private data class LocalCoverCacheHit(val coverUri: String)
     private data class FilePathCacheHit(val path: String?)
-    private val localCoverLookupCache = object : LinkedHashMap<String, String?>(
+    private val localLyricsLookupCache = object : LinkedHashMap<String, LocalLyricsScanMetadata>(
+        LOCAL_LYRICS_LOOKUP_CACHE_LIMIT,
+        0.75f,
+        true
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, LocalLyricsScanMetadata>
+        ): Boolean {
+            return size > LOCAL_LYRICS_LOOKUP_CACHE_LIMIT
+        }
+    }
+    private val localCoverLookupCache = object : LinkedHashMap<String, String>(
         LOCAL_COVER_LOOKUP_CACHE_LIMIT,
         0.75f,
         true
     ) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String?>): Boolean {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean {
             return size > LOCAL_COVER_LOOKUP_CACHE_LIMIT
         }
     }
@@ -523,15 +584,151 @@ object LocalMediaSupport {
             } else {
                 directOutcome
             }
-            if (outcome == LocalMediaMetadataWriteOutcome.SUCCESS) {
-                return@withContext outcome
+            val sidecarWritten = if (writeLyrics) {
+                writeLocalLyricsMetadata(
+                    context = context,
+                    sourceUri = sourceUri,
+                    file = runCatching { resolveLocalFile(context, sourceUri) }.getOrNull(),
+                    displayName = song.localFileName
+                        ?.takeIf(String::isNotBlank)
+                        ?: sourceUri.lastPathSegment.orEmpty(),
+                    song = song
+                )
+            } else {
+                true
+            }
+            val finalOutcome = when {
+                !writeLyrics -> outcome
+                !sidecarWritten -> LocalMediaMetadataWriteOutcome.FAILED
+                outcome == LocalMediaMetadataWriteOutcome.SUCCESS -> {
+                    LocalMediaMetadataWriteOutcome.SUCCESS
+                }
+                !writeCover -> LocalMediaMetadataWriteOutcome.SUCCESS
+                else -> outcome
+            }
+            if (!sidecarWritten) {
+                NPLogger.w(TAG, "write local lyrics metadata sidecar failed for $sourceUri")
+            }
+            if (finalOutcome == LocalMediaMetadataWriteOutcome.SUCCESS) {
+                return@withContext finalOutcome
             }
             fallbackOutcome = selectEditableMetadataWriteFallback(
                 current = fallbackOutcome,
-                candidate = outcome
+                candidate = finalOutcome
             )
         }
         fallbackOutcome
+    }
+
+    /**
+     * 只读取歌词相关字段，避免歌词首屏触发 TagLib、封面和音频轨道解析
+     */
+    internal fun inspectLyricsFast(
+        song: SongItem
+    ): LocalLyricsScanMetadata {
+        val stored = LocalLyricsScanMetadata(
+            lyric = song.matchedLyric ?: song.originalLyric,
+            translatedLyric = song.matchedTranslatedLyric ?: song.originalTranslatedLyric,
+            romanizedLyric = null
+        )
+
+        val source = song.localMediaUri()
+        val cacheKey = buildLocalLyricsCacheKey(song, source)
+        synchronized(localLyricsLookupCache) {
+            localLyricsLookupCache[cacheKey]?.let { return it }
+        }
+
+        val directFile = song.localFilePath
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.takeIf(File::isFile)
+            ?: source
+                ?.takeIf { it.scheme.equals("file", ignoreCase = true) }
+                ?.path
+                ?.let(::File)
+                ?.takeIf(File::isFile)
+        val scanned = if (directFile != null) {
+            runCatching {
+                inspectLyricsFromDirectFile(
+                    file = directFile
+                )
+            }.getOrElse {
+                NPLogger.w(TAG, "fast local lyrics inspection failed for $source: ${it.message}")
+                LocalLyricsScanMetadata(null, null, null)
+            }
+        } else {
+            // SAF 歌词引用在导入阶段已写入 SongItem, 首屏不再同步查询文档树
+            LocalLyricsScanMetadata(null, null, null)
+        }
+        val result = LocalLyricsScanMetadata(
+            lyric = stored.lyric ?: scanned.lyric,
+            translatedLyric = stored.translatedLyric ?: scanned.translatedLyric,
+            romanizedLyric = scanned.romanizedLyric
+        )
+        synchronized(localLyricsLookupCache) {
+            localLyricsLookupCache[cacheKey] = result
+        }
+        return result
+    }
+
+    private fun inspectLyricsFromDirectFile(
+        file: File
+    ): LocalLyricsScanMetadata {
+        val metadataFile = File(
+            file.parentFile ?: return LocalLyricsScanMetadata(null, null, null),
+            file.name + LOCAL_METADATA_SUFFIX
+        )
+        val localMetadata = if (metadataFile.isFile) {
+            readTextFile(metadataFile)?.let {
+                parseLocalMetadataSidecar(metadataFile.absolutePath, it)
+            }
+        } else {
+            null
+        }
+        val nearbyFiles = findNearbyLyricFiles(file)
+        fun read(reference: File?): String? {
+            return reference?.let(::readTextFile)
+        }
+        val nearbyLyric = read(nearbyFiles.original)
+        val nearbyTranslatedLyric = read(nearbyFiles.translated)
+        val nearbyRomanizedLyric = read(nearbyFiles.romanized)
+        return LocalLyricsScanMetadata(
+            lyric = if (localMetadata?.hasLyricOverride == true) {
+                localMetadata.lyric
+            } else {
+                nearbyLyric
+            },
+            translatedLyric = if (localMetadata?.hasTranslatedLyricOverride == true) {
+                localMetadata.translatedLyric
+            } else {
+                nearbyTranslatedLyric
+            },
+            romanizedLyric = if (localMetadata?.hasRomanizedLyricOverride == true) {
+                localMetadata.romanizedLyric
+            } else {
+                nearbyRomanizedLyric
+            }
+        )
+    }
+
+    internal fun clearLyricsLookupCache() {
+        synchronized(localLyricsLookupCache) {
+            localLyricsLookupCache.clear()
+        }
+    }
+
+    private fun buildLocalLyricsCacheKey(song: SongItem, source: Uri?): String {
+        val localFile = song.localFilePath?.let(::File)
+        val localFileState = localFile?.let {
+            "${it.length()}:${it.lastModified()}:${it.parentFile?.lastModified()}"
+        }.orEmpty()
+        return listOf(
+            song.sourceStableKey,
+            song.localFilePath,
+            song.localFileName,
+            source?.toString(),
+            localFileState
+        ).joinToString("|")
     }
 
     private fun selectEditableMetadataWriteFallback(
@@ -585,16 +782,14 @@ object LocalMediaSupport {
             song.localFilePath,
             sourcePathSegment,
             song.mediaUri
-        ).asSequence()
-            .mapNotNull { reference ->
-                reference
-                    ?.substringBefore('?')
-                    ?.substringBefore('#')
-                    ?.substringAfterLast('.', "")
-                    ?.lowercase(Locale.ROOT)
-                    ?.takeIf(String::isNotBlank)
-            }
-            .firstOrNull()
+        ).firstNotNullOfOrNull { reference ->
+            reference
+                ?.substringBefore('?')
+                ?.substringBefore('#')
+                ?.substringAfterLast('.', "")
+                ?.lowercase(Locale.ROOT)
+                ?.takeIf(String::isNotBlank)
+        }
             ?: "bin"
     }
 
@@ -1072,6 +1267,66 @@ object LocalMediaSupport {
             ?: queried.album?.takeIf { it.isNotBlank() }
         val usesFallbackAlbum = album == null
         val nearbyCover = findNearbyCover(file)
+        val localMetadata = readLocalMetadataSidecar(
+            context = context,
+            sourceUri = uri,
+            file = file,
+            displayName = resolved.displayName
+        )
+        val nearbyLyricFiles = findNearbyLyricFiles(file)
+        val nearbyLyricReferences = findNearbyLyricReferences(
+            context = context,
+            uri = uri,
+            file = file,
+            displayName = resolved.displayName
+        )
+        val nearbyLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.original
+                ?: nearbyLyricFiles.original?.absolutePath,
+            label = "scan lyric"
+        )
+        val nearbyTranslatedLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.translated
+                ?: nearbyLyricFiles.translated?.absolutePath,
+            label = "scan translated lyric"
+        )
+        val nearbyRomanizedLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.romanized
+                ?: nearbyLyricFiles.romanized?.absolutePath,
+            label = "scan romanized lyric"
+        )
+        val effectiveLyricContent = if (localMetadata?.hasLyricOverride == true) {
+            localMetadata.lyric
+        } else {
+            resolveEffectiveLocalLyricContent(
+                sidecarContent = nearbyLyricContent,
+                embeddedContent = tagLibMetadata?.lyrics
+            )
+        }
+        val effectiveTranslatedLyricContent = if (
+            localMetadata?.hasTranslatedLyricOverride == true
+        ) {
+            localMetadata.translatedLyric
+        } else {
+            resolveEffectiveLocalLyricContent(
+                sidecarContent = nearbyTranslatedLyricContent,
+                embeddedContent = tagLibMetadata?.translatedLyrics
+            )
+        }
+        val effectiveRomanizedLyricContent = if (
+            localMetadata?.hasRomanizedLyricOverride == true
+        ) {
+            localMetadata.romanizedLyric
+        } else {
+            nearbyRomanizedLyricContent?.takeIf(String::isNotBlank)
+        }
+        val lyricReference = localMetadata?.reference
+            ?.takeIf { localMetadata.hasLyricOverride }
+            ?: nearbyLyricReferences.original
+            ?: nearbyLyricFiles.original?.absolutePath
 
         return LocalMediaDetails(
             sourceUri = uri,
@@ -1101,16 +1356,93 @@ object LocalMediaSupport {
             coverSource = nearbyCover?.let {
                 context.getString(R.string.local_song_cover_external)
             },
-            lyricContent = null,
-            lyricPath = null,
-            lyricSource = null,
+            lyricContent = effectiveLyricContent,
+            lyricPath = resolveEffectiveLocalLyricPath(
+                reference = lyricReference,
+                content = effectiveLyricContent
+            ),
+            lyricSource = when {
+                localMetadata?.hasLyricOverride != true &&
+                    !nearbyLyricContent.isNullOrBlank() -> {
+                    context.getString(R.string.local_song_lyric_external)
+                }
+                !effectiveLyricContent.isNullOrBlank() -> {
+                    context.getString(R.string.local_song_lyric_embedded)
+                }
+                else -> null
+            },
             originalTitle = title,
             originalArtist = tagLibMetadata?.artist
                 ?: containerMetadata?.artist?.takeIf { it.isNotBlank() }
                 ?: queried.artist?.takeIf { it.isNotBlank() }
                 ?: artist,
             embeddedCover = false,
-            sourceStableKey = tagLibMetadata?.sourceStableKey
+            sourceStableKey = tagLibMetadata?.sourceStableKey,
+            translatedLyricContent = effectiveTranslatedLyricContent,
+            romanizedLyricContent = effectiveRomanizedLyricContent
+        )
+    }
+
+    internal fun inspectLyricsForScan(
+        context: Context,
+        uri: Uri
+    ): LocalLyricsScanMetadata {
+        val resolved = resolveInspectableLocalMedia(
+            context = context,
+            uri = uri,
+            allowDescriptorFallback = true
+        )
+        val localMetadata = readLocalMetadataSidecar(
+            context = context,
+            sourceUri = uri,
+            file = resolved.file,
+            displayName = resolved.displayName
+        )
+        val nearbyFiles = findNearbyLyricFiles(resolved.file)
+        val nearbyReferences = findNearbyLyricReferences(
+            context = context,
+            uri = uri,
+            file = resolved.file,
+            displayName = resolved.displayName
+        )
+        fun read(reference: String?, fallback: File?, label: String): String? {
+            return readNearbyLyricContent(
+                context = context,
+                reference = reference ?: fallback?.absolutePath,
+                label = label
+            )
+        }
+        val nearbyLyric = read(
+            nearbyReferences.original,
+            nearbyFiles.original,
+            "quick scan lyric"
+        )
+        val nearbyTranslatedLyric = read(
+            nearbyReferences.translated,
+            nearbyFiles.translated,
+            "quick scan translated lyric"
+        )
+        val nearbyRomanizedLyric = read(
+            nearbyReferences.romanized,
+            nearbyFiles.romanized,
+            "quick scan romanized lyric"
+        )
+        return LocalLyricsScanMetadata(
+            lyric = if (localMetadata?.hasLyricOverride == true) {
+                localMetadata.lyric
+            } else {
+                nearbyLyric
+            },
+            translatedLyric = if (localMetadata?.hasTranslatedLyricOverride == true) {
+                localMetadata.translatedLyric
+            } else {
+                nearbyTranslatedLyric
+            },
+            romanizedLyric = if (localMetadata?.hasRomanizedLyricOverride == true) {
+                localMetadata.romanizedLyric
+            } else {
+                nearbyRomanizedLyric
+            }
         )
     }
 
@@ -1151,6 +1483,17 @@ object LocalMediaSupport {
             ?: queried.album?.takeIf { it.isNotBlank() }
         val usesFallbackAlbum = album == null
         val resolvedAlbum = album ?: context.getString(R.string.local_files)
+        val localMetadata = readLocalMetadataSidecar(
+            context = context,
+            sourceUri = uri,
+            file = file,
+            displayName = resolved.displayName
+        )
+        val coverUri = runCatching {
+            resolveCoverUri(context, uri)
+        }.onFailure {
+            NPLogger.w(TAG, "resolve metadata-only cover failed for $uri: ${it.message}")
+        }.getOrNull()
 
         return LocalMediaDetails(
             sourceUri = uri,
@@ -1189,9 +1532,9 @@ object LocalMediaSupport {
             sizeBytes = queried.sizeBytes ?: file?.length(),
             lastModifiedMs = queried.lastModifiedMs ?: file?.lastModified(),
             filePath = file?.absolutePath ?: queried.filePath,
-            coverUri = null,
+            coverUri = coverUri,
             coverSource = null,
-            lyricContent = null,
+            lyricContent = localMetadata?.lyric,
             lyricPath = null,
             lyricSource = null,
             originalTitle = title,
@@ -1201,7 +1544,9 @@ object LocalMediaSupport {
                 ?: queried.artist?.takeIf { it.isNotBlank() }
                 ?: artist,
             embeddedCover = false,
-            sourceStableKey = tagLibMetadata?.sourceStableKey
+            sourceStableKey = tagLibMetadata?.sourceStableKey,
+            translatedLyricContent = localMetadata?.translatedLyric,
+            romanizedLyricContent = localMetadata?.romanizedLyric
         )
     }
 
@@ -1249,15 +1594,64 @@ object LocalMediaSupport {
             file = file
         )
         val nearbyCover = findNearbyCover(file)
-        val nearbyLyrics = findNearbyLyrics(file)
-        val nearbyLyricContent = nearbyLyrics?.let {
-            readTextFile(it)
-                ?: run {
-                    NPLogger.w(TAG, "read lyric failed for ${it.absolutePath}")
-                    null
-                }
+        val nearbyLyricFiles = findNearbyLyricFiles(file)
+        val nearbyLyricReferences = findNearbyLyricReferences(
+            context = context,
+            uri = uri,
+            file = file,
+            displayName = displayName
+        )
+        val nearbyLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.original
+                ?: nearbyLyricFiles.original?.absolutePath,
+            label = "lyric"
+        )
+        val nearbyTranslatedLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.translated
+                ?: nearbyLyricFiles.translated?.absolutePath,
+            label = "translated lyric"
+        )
+        val nearbyRomanizedLyricContent = readNearbyLyricContent(
+            context = context,
+            reference = nearbyLyricReferences.romanized
+                ?: nearbyLyricFiles.romanized?.absolutePath,
+            label = "romanized lyric"
+        )
+        val localMetadata = readLocalMetadataSidecar(
+            context = context,
+            sourceUri = uri,
+            file = file,
+            displayName = displayName
+        )
+        val hasEffectiveExternalLyric =
+            localMetadata?.hasLyricOverride != true && !nearbyLyricContent.isNullOrBlank()
+        val effectiveLyricContent = if (localMetadata?.hasLyricOverride == true) {
+            localMetadata.lyric
+        } else {
+            resolveEffectiveLocalLyricContent(
+                sidecarContent = nearbyLyricContent,
+                embeddedContent = tagLibMetadata?.lyrics
+            )
         }
-        val effectiveLyricContent = nearbyLyricContent ?: tagLibMetadata?.lyrics?.takeIf { it.isNotBlank() }
+        val effectiveTranslatedLyricContent = if (
+            localMetadata?.hasTranslatedLyricOverride == true
+        ) {
+            localMetadata.translatedLyric
+        } else {
+            resolveEffectiveLocalLyricContent(
+                sidecarContent = nearbyTranslatedLyricContent,
+                embeddedContent = tagLibMetadata?.translatedLyrics
+            )
+        }
+        val effectiveRomanizedLyricContent = if (
+            localMetadata?.hasRomanizedLyricOverride == true
+        ) {
+            localMetadata.romanizedLyric
+        } else {
+            nearbyRomanizedLyricContent?.takeIf(String::isNotBlank)
+        }
 
         val retriever = MediaMetadataRetriever()
         return try {
@@ -1390,13 +1784,20 @@ object LocalMediaSupport {
                     else -> null
                 },
                 lyricContent = effectiveLyricContent,
-                lyricPath = nearbyLyrics?.absolutePath,
+                lyricPath = resolveEffectiveLocalLyricPath(
+                    reference = localMetadata?.reference
+                        ?.takeIf { localMetadata.hasLyricOverride }
+                        ?: nearbyLyricReferences.original
+                        ?: nearbyLyricFiles.original?.absolutePath,
+                    content = effectiveLyricContent
+                ),
                 lyricSource = when {
-                    nearbyLyrics != null -> context.getString(R.string.local_song_lyric_external)
+                    hasEffectiveExternalLyric -> context.getString(R.string.local_song_lyric_external)
                     !effectiveLyricContent.isNullOrBlank() -> context.getString(R.string.local_song_lyric_embedded)
                     else -> null
                 },
-                translatedLyricContent = tagLibMetadata?.translatedLyrics,
+                translatedLyricContent = effectiveTranslatedLyricContent,
+                romanizedLyricContent = effectiveRomanizedLyricContent,
                 originalTitle = title,
                 originalArtist = tagLibMetadata?.artist ?: containerMetadata?.artist ?: queried.artist ?: artist,
                 embeddedCover = embeddedCover || tagLibCoverUri != null,
@@ -1456,13 +1857,20 @@ object LocalMediaSupport {
                     else -> null
                 },
                 lyricContent = effectiveLyricContent,
-                lyricPath = nearbyLyrics?.absolutePath,
+                lyricPath = resolveEffectiveLocalLyricPath(
+                    reference = localMetadata?.reference
+                        ?.takeIf { localMetadata.hasLyricOverride }
+                        ?: nearbyLyricReferences.original
+                        ?: nearbyLyricFiles.original?.absolutePath,
+                    content = effectiveLyricContent
+                ),
                 lyricSource = when {
-                    nearbyLyrics != null -> context.getString(R.string.local_song_lyric_external)
+                    hasEffectiveExternalLyric -> context.getString(R.string.local_song_lyric_external)
                     !effectiveLyricContent.isNullOrBlank() -> context.getString(R.string.local_song_lyric_embedded)
                     else -> null
                 },
-                translatedLyricContent = tagLibMetadata?.translatedLyrics,
+                translatedLyricContent = effectiveTranslatedLyricContent,
+                romanizedLyricContent = effectiveRomanizedLyricContent,
                 originalTitle = title,
                 originalArtist = tagLibMetadata?.artist
                     ?: containerMetadata?.artist?.takeIf { it.isNotBlank() }
@@ -1562,7 +1970,8 @@ object LocalMediaSupport {
             lyricSource = null,
             originalTitle = selectedMetadata.title,
             originalArtist = selectedMetadata.artist,
-            embeddedCover = false
+            embeddedCover = false,
+            romanizedLyricContent = null
         )
     }
 
@@ -1731,6 +2140,242 @@ object LocalMediaSupport {
         return decodeTextBytes(bytes)
     }
 
+    private fun readLocalMetadataSidecar(
+        context: Context,
+        sourceUri: Uri,
+        file: File?,
+        displayName: String
+    ): LocalMetadataSidecar? {
+        val reference = resolveLocalMetadataReference(
+            context = context,
+            sourceUri = sourceUri,
+            file = file,
+            displayName = displayName
+        ) ?: return null
+        val raw = readTextContent(context, reference) ?: return null
+        return parseLocalMetadataSidecar(reference, raw)
+    }
+
+    internal fun parseLocalMetadataSidecar(
+        reference: String,
+        raw: String
+    ): LocalMetadataSidecar? {
+        return runCatching {
+            val root = JSONObject(raw)
+            LocalMetadataSidecar(
+                reference = reference,
+                hasLyricOverride = root.has("matchedLyric") || root.has("originalLyric"),
+                hasTranslatedLyricOverride = root.has("matchedTranslatedLyric") ||
+                    root.has("originalTranslatedLyric"),
+                hasRomanizedLyricOverride = root.has("matchedRomanizedLyric") ||
+                    root.has("originalRomanizedLyric"),
+                matchedLyric = root.optPresentLocalMetadataString("matchedLyric"),
+                matchedTranslatedLyric = root.optPresentLocalMetadataString(
+                    "matchedTranslatedLyric"
+                ),
+                originalLyric = root.optPresentLocalMetadataString("originalLyric"),
+                originalTranslatedLyric = root.optPresentLocalMetadataString(
+                    "originalTranslatedLyric"
+                ),
+                matchedRomanizedLyric = root.optPresentLocalMetadataString(
+                    "matchedRomanizedLyric"
+                ),
+                originalRomanizedLyric = root.optPresentLocalMetadataString(
+                    "originalRomanizedLyric"
+                )
+            )
+        }.onFailure {
+            NPLogger.w(TAG, "parse local metadata sidecar failed for $reference: ${it.message}")
+        }.getOrNull()
+    }
+
+    internal fun buildLocalLyricsMetadataJson(
+        existingRaw: String?,
+        song: SongItem
+    ): String {
+        val root = existingRaw
+            ?.takeIf(String::isNotBlank)
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?: JSONObject()
+        song.matchedLyric?.let { root.put("matchedLyric", it) }
+        song.originalLyric?.let { root.put("originalLyric", it) }
+        song.matchedTranslatedLyric?.let { root.put("matchedTranslatedLyric", it) }
+        song.originalTranslatedLyric?.let { root.put("originalTranslatedLyric", it) }
+        return root.toString()
+    }
+
+    private fun writeLocalLyricsMetadata(
+        context: Context,
+        sourceUri: Uri,
+        file: File?,
+        displayName: String,
+        song: SongItem
+    ): Boolean {
+        val metadataReference = resolveLocalMetadataReference(
+            context = context,
+            sourceUri = sourceUri,
+            file = file,
+            displayName = displayName
+        )
+        val targetReference = metadataReference ?: createLocalMetadataReference(
+            context = context,
+            sourceUri = sourceUri,
+            file = file,
+            displayName = displayName
+        ) ?: return false
+        val existingRaw = readTextContent(context, targetReference)
+        val existingParsed = existingRaw?.let {
+            parseLocalMetadataSidecar(targetReference, it)
+        }
+        val updatedRaw = buildLocalLyricsMetadataJson(existingRaw, song)
+        if (!writeLocalMetadataReference(context, targetReference, file, updatedRaw)) {
+            return false
+        }
+        val stored = readTextContent(context, targetReference) ?: return false
+        val parsed = parseLocalMetadataSidecar(targetReference, stored) ?: return false
+        val expectedLyric = song.matchedLyric ?: song.originalLyric ?: existingParsed?.lyric
+        val expectedTranslatedLyric = song.matchedTranslatedLyric
+            ?: song.originalTranslatedLyric
+            ?: existingParsed?.translatedLyric
+        val shouldHaveLyricOverride = song.matchedLyric != null ||
+            song.originalLyric != null || existingParsed?.hasLyricOverride == true
+        val shouldHaveTranslatedLyricOverride = song.matchedTranslatedLyric != null ||
+            song.originalTranslatedLyric != null || existingParsed?.hasTranslatedLyricOverride == true
+        return (!shouldHaveLyricOverride || parsed.hasLyricOverride) &&
+            parsed.lyric == expectedLyric &&
+            (!shouldHaveTranslatedLyricOverride || parsed.hasTranslatedLyricOverride) &&
+            parsed.translatedLyric == expectedTranslatedLyric
+    }
+
+    private fun resolveLocalMetadataReference(
+        context: Context,
+        sourceUri: Uri,
+        file: File?,
+        displayName: String
+    ): String? {
+        file?.let { localFile ->
+            val target = File(localFile.parentFile ?: return@let, localFile.name + LOCAL_METADATA_SUFFIX)
+            if (target.isFile) return target.absolutePath
+        }
+        val navigation = resolveLocalDocumentNavigation(context, sourceUri) ?: return null
+        val parentChildren = queryDocumentChildren(
+            context = context,
+            baseUri = navigation.treeUri ?: navigation.baseUri,
+            parentDocumentId = navigation.parentDocumentId
+        )
+        val metadataName = displayName + LOCAL_METADATA_SUFFIX
+        return parentChildren.firstOrNull { child ->
+            !child.isDirectory && child.displayName == metadataName
+        }?.uri
+            ?: file?.let { localFile ->
+                localFile.parentFile
+                    ?.let { parent -> File(parent, localFile.name + LOCAL_METADATA_SUFFIX) }
+                    ?.takeIf(File::isFile)
+                    ?.absolutePath
+            }
+    }
+
+    private fun createLocalMetadataReference(
+        context: Context,
+        sourceUri: Uri,
+        file: File?,
+        displayName: String
+    ): String? {
+        if (file != null && !sourceUri.authority.equals("com.android.providers.media.documents", true)) {
+            return File(
+                file.parentFile ?: return null,
+                file.name + LOCAL_METADATA_SUFFIX
+            ).absolutePath
+        }
+        val navigation = resolveLocalDocumentNavigation(context, sourceUri) ?: return null
+        val parentId = navigation.parentDocumentId ?: return null
+        val parentUri = buildDocumentReferenceUri(
+            navigation.treeUri ?: navigation.baseUri,
+            parentId
+        )
+        return runCatching {
+            DocumentsContract.createDocument(
+                context.contentResolver,
+                parentUri,
+                "application/json",
+                displayName + LOCAL_METADATA_SUFFIX
+            )?.toString()
+        }.onFailure {
+            NPLogger.w(TAG, "create local metadata sidecar failed for $sourceUri: ${it.message}")
+        }.getOrNull() ?: file?.let { localFile ->
+            localFile.parentFile
+                ?.let { parent -> File(parent, localFile.name + LOCAL_METADATA_SUFFIX) }
+                ?.absolutePath
+        }
+    }
+
+    private fun writeLocalMetadataReference(
+        context: Context,
+        reference: String,
+        file: File?,
+        content: String
+    ): Boolean {
+        if (file != null && reference.startsWith("/")) {
+            val target = File(reference)
+            val parent = target.parentFile ?: return false
+            if (!parent.exists() && !parent.mkdirs()) return false
+            val temp = runCatching {
+                File.createTempFile(".${target.name}.", ".tmp", parent)
+            }.getOrNull() ?: return false
+            return runCatching {
+                temp.writeText(content, Charsets.UTF_8)
+                if (!temp.renameTo(target)) {
+                    temp.copyTo(target, overwrite = true)
+                    temp.delete()
+                }
+                true
+            }.onFailure {
+                temp.delete()
+                NPLogger.w(TAG, "write local metadata sidecar failed for $reference: ${it.message}")
+            }.getOrDefault(false)
+        }
+        return runCatching {
+            context.contentResolver.openOutputStream(reference.toUri(), "wt")
+                ?.use { output -> output.write(content.toByteArray(Charsets.UTF_8)) }
+                ?: return@runCatching false
+            true
+        }.onFailure {
+            NPLogger.w(TAG, "write local metadata sidecar failed for $reference: ${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun resolveLocalDocumentNavigation(
+        context: Context,
+        uri: Uri
+    ): LocalDocumentNavigation? {
+        if (!uri.scheme.equals("content", ignoreCase = true)) return null
+        val treeDocumentId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+        val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+        val treeUri = runCatching {
+            val authority = uri.authority ?: return@runCatching null
+            treeDocumentId?.let { DocumentsContract.buildTreeDocumentUri(authority, it) }
+        }.getOrNull()
+        val documentUri = if (treeUri != null && documentId != null) {
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+        } else {
+            uri
+        }
+        val providerParentId = findDocumentParentId(context, documentUri)
+        val slashDelimitedParentId = documentId
+            ?.substringBeforeLast('/', missingDelimiterValue = "")
+            ?.takeIf { it.isNotBlank() && it != documentId }
+        return LocalDocumentNavigation(
+            baseUri = uri,
+            treeUri = treeUri,
+            parentDocumentId = providerParentId ?: slashDelimitedParentId ?: treeDocumentId
+        )
+    }
+
+    private fun JSONObject.optPresentLocalMetadataString(fieldName: String): String? {
+        if (!has(fieldName) || isNull(fieldName)) return null
+        return optString(fieldName)
+    }
+
     private fun readLimitedTextFile(file: File): ByteArray {
         val length = file.length()
         require(length <= MAX_LOCAL_LYRIC_BYTES) { "text file is too large: $length bytes" }
@@ -1738,7 +2383,7 @@ object LocalMediaSupport {
     }
 
     private fun readLimitedTextStream(input: InputStream): ByteArray {
-        val output = java.io.ByteArrayOutputStream()
+        val output = ByteArrayOutputStream()
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0L
         while (true) {
@@ -2370,7 +3015,7 @@ object LocalMediaSupport {
         audioExtension: String?
     ): Array<Picture> {
         if (usesRolelessEditableCoverPictures(audioExtension)) {
-            return replacementPicture?.let(::arrayOf) ?: emptyArray()
+            return replacementPicture?.let { arrayOf<Picture>(it) } ?: emptyArray<Picture>()
         }
         val retainedPictures = existingPictures.filterNot(::isFrontCoverPicture)
         return if (replacementPicture == null) {
@@ -2898,14 +3543,31 @@ object LocalMediaSupport {
 
     private fun cachedLocalCoverLookup(cacheKey: String): LocalCoverCacheHit? {
         synchronized(localCoverLookupCache) {
-            if (!localCoverLookupCache.containsKey(cacheKey)) return null
-            return LocalCoverCacheHit(localCoverLookupCache[cacheKey])
+            val coverUri = localCoverLookupCache[cacheKey] ?: return null
+            if (!isUsableCachedCoverUri(coverUri)) {
+                localCoverLookupCache.remove(cacheKey)
+                return null
+            }
+            return LocalCoverCacheHit(coverUri)
         }
     }
 
+    private fun isUsableCachedCoverUri(coverUri: String): Boolean {
+        val uri = runCatching { coverUri.toUri() }.getOrNull() ?: return false
+        if (!uri.scheme.equals("file", ignoreCase = true)) {
+            return true
+        }
+        val path = uri.path ?: return false
+        return File(path).isFile && File(path).length() > 0L
+    }
+
     private fun rememberLocalCoverLookup(cacheKey: String, coverUri: String?) {
+        val normalizedCoverUri = coverUri
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
         synchronized(localCoverLookupCache) {
-            localCoverLookupCache[cacheKey] = coverUri
+            localCoverLookupCache[cacheKey] = normalizedCoverUri
         }
     }
 
@@ -3017,25 +3679,355 @@ object LocalMediaSupport {
         return file.toURI().toString()
     }
 
-    private fun findNearbyLyrics(file: File?): File? {
-        val actualFile = file ?: return null
-        val parent = actualFile.parentFile ?: return null
+    internal fun findNearbyLyricFiles(
+        file: File?,
+        extensions: List<String> = lyricExtensions
+    ): NearbyLyricFiles {
+        val actualFile = file ?: return NearbyLyricFiles(null, null, null)
+        val parent = actualFile.parentFile ?: return NearbyLyricFiles(null, null, null)
         val baseName = actualFile.nameWithoutExtension
+        val searchDirectories = listOf(parent, File(parent, "Lyrics"))
+            .filter(File::isDirectory)
 
-        lyricExtensions.forEach { ext ->
-            val sibling = File(parent, "$baseName.$ext")
-            if (sibling.exists()) return sibling
+        return NearbyLyricFiles(
+            original = findFirstLyricSidecar(
+                searchDirectories = searchDirectories,
+                fileNames = lyricSidecarNames(
+                    baseName = baseName,
+                    kind = LyricKind.ORIGINAL,
+                    extensions = extensions
+                )
+            ),
+            translated = findFirstLyricSidecar(
+                searchDirectories = searchDirectories,
+                fileNames = lyricSidecarNames(
+                    baseName = baseName,
+                    kind = LyricKind.TRANSLATED,
+                    extensions = extensions
+                )
+            ),
+            romanized = findFirstLyricSidecar(
+                searchDirectories = searchDirectories,
+                fileNames = lyricSidecarNames(
+                    baseName = baseName,
+                    kind = LyricKind.ROMANIZED,
+                    extensions = extensions
+                )
+            )
+        )
+    }
+
+    internal fun copyNearbyLyricSidecars(
+        context: Context,
+        sourceUri: Uri,
+        sourceDisplayName: String,
+        targetFile: File
+    ) {
+        if (!sourceUri.scheme.equals("content", ignoreCase = true)) {
+            return
+        }
+        val references = findNearbyLyricReferences(
+            context = context,
+            uri = sourceUri,
+            file = null,
+            displayName = sourceDisplayName
+        )
+        val targetLyricFiles = findNearbyLyricFiles(targetFile)
+        val metadataReference = resolveLocalMetadataReference(
+            context = context,
+            sourceUri = sourceUri,
+            file = null,
+            displayName = sourceDisplayName
+        )
+        if (metadataReference != null) {
+            copyLyricReference(
+                context = context,
+                reference = metadataReference,
+                target = File(targetFile.parentFile ?: return, targetFile.name + LOCAL_METADATA_SUFFIX)
+            )
+        }
+        listOf(
+            Triple(references.original, targetLyricFiles.original, ""),
+            Triple(references.translated, targetLyricFiles.translated, "_trans"),
+            Triple(references.romanized, targetLyricFiles.romanized, "_roma")
+        ).forEach { (reference, existingTarget, suffix) ->
+            if (reference == null || existingTarget != null) {
+                return@forEach
+            }
+            copyLyricReference(
+                context = context,
+                reference = reference,
+                target = File(
+                    targetFile.parentFile ?: return@forEach,
+                    "${targetFile.nameWithoutExtension}$suffix.lrc"
+                )
+            )
+        }
+    }
+
+    private fun copyLyricReference(
+        context: Context,
+        reference: String,
+        target: File
+    ) {
+        if (target.exists()) return
+        runCatching {
+            context.contentResolver.openInputStream(reference.toUri())?.use { input ->
+                target.parentFile?.mkdirs()
+                FileOutputStream(target).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: error("unable to open lyric sidecar: $reference")
+        }.onFailure {
+            NPLogger.w(TAG, "copy lyric sidecar failed for $reference: ${it.message}")
+            target.delete()
+        }
+    }
+
+    private fun readNearbyLyricContent(
+        context: Context,
+        reference: String?,
+        label: String
+    ): String? {
+        return reference?.let {
+            readTextContent(context, it)
+                ?: run {
+                    NPLogger.w(TAG, "read $label failed for $it")
+                    null
+                }
+        }
+    }
+
+    private fun findNearbyLyricReferences(
+        context: Context,
+        uri: Uri,
+        file: File?,
+        displayName: String
+    ): NearbyLyricReferences {
+        val localFiles = findNearbyLyricFiles(file)
+        if (!uri.scheme.equals("content", ignoreCase = true)) {
+            return NearbyLyricReferences(
+                original = localFiles.original?.absolutePath,
+                translated = localFiles.translated?.absolutePath,
+                romanized = localFiles.romanized?.absolutePath
+            )
         }
 
-        val lyricsDir = File(parent, "Lyrics")
-        if (lyricsDir.exists()) {
-            lyricExtensions.forEach { ext ->
-                val nested = File(lyricsDir, "$baseName.$ext")
-                if (nested.exists()) return nested
+        val treeDocumentId = runCatching {
+            DocumentsContract.getTreeDocumentId(uri)
+        }.getOrNull()
+        val documentId = runCatching {
+            DocumentsContract.getDocumentId(uri)
+        }.getOrNull()
+        val treeUri = runCatching {
+            val authority = uri.authority ?: return@runCatching null
+            treeDocumentId?.let { documentId ->
+                DocumentsContract.buildTreeDocumentUri(authority, documentId)
+            }
+        }.getOrNull()
+        val documentUri = if (treeUri != null && documentId != null) {
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+        } else {
+            uri
+        }
+        val providerParentId = findDocumentParentId(context, documentUri)
+        val slashDelimitedParentId = documentId
+            ?.substringBeforeLast('/', missingDelimiterValue = "")
+            ?.takeIf { it.isNotBlank() && it != documentId }
+        val parentDocumentId = providerParentId
+            ?: slashDelimitedParentId
+            ?: treeDocumentId
+        val parentChildren = queryDocumentChildren(
+            context = context,
+            baseUri = treeUri ?: uri,
+            parentDocumentId = parentDocumentId
+        )
+        val audioBaseName = displayName.substringBeforeLast('.', displayName)
+        val directReferences = resolveDocumentLyricReferences(
+            children = parentChildren,
+            baseName = audioBaseName
+        )
+        val lyricsDirectory = parentChildren.firstOrNull {
+            it.isDirectory && it.displayName.equals("Lyrics", ignoreCase = true)
+        }
+        val nestedReferences = resolveDocumentLyricReferences(
+            children = lyricsDirectory?.let {
+                queryDocumentChildren(
+                    context = context,
+                    baseUri = treeUri ?: uri,
+                    parentDocumentId = it.documentId
+                )
+            }.orEmpty(),
+            baseName = audioBaseName
+        )
+        return NearbyLyricReferences(
+            original = directReferences.original ?: nestedReferences.original
+                ?: localFiles.original?.absolutePath,
+            translated = directReferences.translated ?: nestedReferences.translated
+                ?: localFiles.translated?.absolutePath,
+            romanized = directReferences.romanized ?: nestedReferences.romanized
+                ?: localFiles.romanized?.absolutePath
+        )
+    }
+
+    private fun findDocumentParentId(context: Context, documentUri: Uri): String? {
+        return runCatching {
+            DocumentsContract.findDocumentPath(context.contentResolver, documentUri)
+                ?.path
+                ?.dropLast(1)
+                ?.lastOrNull()
+                ?.takeIf(String::isNotBlank)
+        }.getOrNull()
+    }
+
+    private fun resolveDocumentLyricReferences(
+        children: Collection<DocumentChild>,
+        baseName: String
+    ): NearbyLyricReferences {
+        fun find(kind: LyricKind): String? {
+            val names = lyricSidecarNames(baseName, kind, lyricExtensions)
+            return names.firstNotNullOfOrNull { expectedName ->
+                children.firstOrNull { child ->
+                    !child.isDirectory && child.displayName == expectedName
+                }?.uri
             }
         }
+        return NearbyLyricReferences(
+            original = find(LyricKind.ORIGINAL),
+            translated = find(LyricKind.TRANSLATED),
+            romanized = find(LyricKind.ROMANIZED)
+        )
+    }
 
-        return null
+    private data class DocumentChild(
+        val documentId: String,
+        val displayName: String,
+        val isDirectory: Boolean,
+        val uri: String
+    )
+
+    private fun queryDocumentChildren(
+        context: Context,
+        baseUri: Uri,
+        parentDocumentId: String?
+    ): List<DocumentChild> {
+        val resolvedParentId = parentDocumentId?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val childrenUri = runCatching {
+            if (DocumentsContract.isTreeUri(baseUri)) {
+                DocumentsContract.buildChildDocumentsUriUsingTree(baseUri, resolvedParentId)
+            } else {
+                DocumentsContract.buildChildDocumentsUri(
+                    baseUri.authority ?: return@runCatching null,
+                    resolvedParentId
+                )
+            }
+        }.getOrNull() ?: return emptyList()
+        return runCatching {
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                ),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0) {
+                    return@use emptyList()
+                }
+                buildList {
+                    while (cursor.moveToNext()) {
+                        val childId = cursor.getString(idIndex)?.takeIf { it.isNotBlank() }
+                            ?: continue
+                        val childName = cursor.getString(nameIndex)?.takeIf { it.isNotBlank() }
+                            ?: continue
+                        val mimeType = cursor.getString(mimeIndex).orEmpty()
+                        add(
+                            DocumentChild(
+                                documentId = childId,
+                                displayName = childName,
+                                isDirectory = mimeType == DocumentsContract.Document.MIME_TYPE_DIR,
+                                uri = buildDocumentReferenceUri(baseUri, childId).toString()
+                            )
+                        )
+                    }
+                }
+            }.orEmpty()
+        }.onFailure {
+            NPLogger.w(TAG, "query document lyric children failed for $baseUri: ${it.message}")
+        }.getOrDefault(emptyList())
+    }
+
+    private fun buildDocumentReferenceUri(baseUri: Uri, documentId: String): Uri {
+        return if (DocumentsContract.isTreeUri(baseUri)) {
+            DocumentsContract.buildDocumentUriUsingTree(baseUri, documentId)
+        } else {
+            DocumentsContract.buildDocumentUri(
+                baseUri.authority ?: error("Document URI has no authority: $baseUri"),
+                documentId
+            )
+        }
+    }
+
+    internal fun resolveEffectiveLocalLyricContent(
+        sidecarContent: String?,
+        embeddedContent: String?
+    ): String? {
+        return sidecarContent?.takeIf(String::isNotBlank)
+            ?: embeddedContent?.takeIf(String::isNotBlank)
+    }
+
+    internal fun resolveEffectiveLocalLyricPath(
+        reference: String?,
+        content: String?
+    ): String? {
+        return reference?.takeIf { !content.isNullOrBlank() }
+    }
+
+    private fun findFirstLyricSidecar(
+        searchDirectories: List<File>,
+        fileNames: List<String>
+    ): File? {
+        return searchDirectories.asSequence()
+            .flatMap { directory -> fileNames.asSequence().map { File(directory, it) } }
+            .firstOrNull(File::isFile)
+    }
+
+    private fun lyricSidecarNames(
+        baseName: String,
+        kind: LyricKind,
+        extensions: List<String>
+    ): List<String> {
+        val prefixes = when (kind) {
+            LyricKind.ORIGINAL -> listOf(baseName)
+            LyricKind.TRANSLATED -> listOf("${baseName}_trans")
+            LyricKind.ROMANIZED -> listOf(
+                "${baseName}_roma",
+                "${baseName}_romalrc",
+                "${baseName}_romanized"
+            )
+        }
+        return buildList {
+            prefixes.forEach { prefix ->
+                extensions.forEach { extension ->
+                    add("$prefix.$extension")
+                }
+                if ("lrc" in extensions) {
+                    add("$prefix.lrc.txt")
+                }
+            }
+        }
+    }
+
+    private enum class LyricKind {
+        ORIGINAL,
+        TRANSLATED,
+        ROMANIZED
     }
 
     internal fun findNearbyCover(file: File?): File? {
@@ -3096,27 +4088,27 @@ object LocalMediaSupport {
 
     private fun cachedNearbyCover(cacheKey: String): FilePathCacheHit? {
         synchronized(nearbyCoverLookupCache) {
-            if (!nearbyCoverLookupCache.containsKey(cacheKey)) return null
-            return FilePathCacheHit(nearbyCoverLookupCache[cacheKey])
+            return nearbyCoverLookupCache[cacheKey]?.let(::FilePathCacheHit)
         }
     }
 
     private fun rememberNearbyCover(cacheKey: String, cover: File?) {
+        val coverPath = cover?.absolutePath ?: return
         synchronized(nearbyCoverLookupCache) {
-            nearbyCoverLookupCache[cacheKey] = cover?.absolutePath
+            nearbyCoverLookupCache[cacheKey] = coverPath
         }
     }
 
     private fun cachedDirectoryCover(cacheKey: String): FilePathCacheHit? {
         synchronized(directoryCoverLookupCache) {
-            if (!directoryCoverLookupCache.containsKey(cacheKey)) return null
-            return FilePathCacheHit(directoryCoverLookupCache[cacheKey])
+            return directoryCoverLookupCache[cacheKey]?.let(::FilePathCacheHit)
         }
     }
 
     private fun rememberDirectoryCover(cacheKey: String, cover: File?) {
+        val coverPath = cover?.absolutePath ?: return
         synchronized(directoryCoverLookupCache) {
-            directoryCoverLookupCache[cacheKey] = cover?.absolutePath
+            directoryCoverLookupCache[cacheKey] = coverPath
         }
     }
 

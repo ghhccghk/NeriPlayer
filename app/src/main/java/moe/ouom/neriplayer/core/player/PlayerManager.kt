@@ -47,10 +47,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.google.gson.Gson
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -78,6 +81,7 @@ import moe.ouom.neriplayer.core.player.lifecycle.initializeImpl
 import moe.ouom.neriplayer.core.player.lifecycle.releaseImpl
 import moe.ouom.neriplayer.core.player.lifecycle.scheduleUsbAudioSinkReconfiguration
 import moe.ouom.neriplayer.core.player.lifecycle.updateAudioOffloadPreferences
+import moe.ouom.neriplayer.core.player.lyrics.LyriconUpdateCoordinator
 import moe.ouom.neriplayer.core.player.lyrics.syncExternalBluetoothLyrics
 import moe.ouom.neriplayer.core.player.model.AudioDevice
 import moe.ouom.neriplayer.core.player.model.DEFAULT_PLAYBACK_LOUDNESS_GAIN_MB
@@ -155,6 +159,7 @@ import moe.ouom.neriplayer.core.player.playback.playBiliVideoPartsImpl
 import moe.ouom.neriplayer.core.player.playback.playImpl
 import moe.ouom.neriplayer.core.player.playback.playPlaylistImpl
 import moe.ouom.neriplayer.core.player.playback.previousImpl
+import moe.ouom.neriplayer.core.player.playback.restoreAudioRouteMuteImpl
 import moe.ouom.neriplayer.core.player.playback.seekToImpl
 import moe.ouom.neriplayer.core.player.playback.setShuffleImpl
 import moe.ouom.neriplayer.core.player.playback.stopPlaybackPreservingQueueImpl
@@ -199,6 +204,8 @@ import moe.ouom.neriplayer.core.player.timer.SleepTimerManager
 import moe.ouom.neriplayer.core.player.timer.SleepTimerMode
 import moe.ouom.neriplayer.core.player.url.YOUTUBE_PLAYBACK_PREFER_M4A
 import moe.ouom.neriplayer.core.player.url.refreshCurrentSongUrlImpl
+import moe.ouom.neriplayer.core.player.url.safeCustomPlaybackCacheKey
+import moe.ouom.neriplayer.core.player.url.stripListenTogetherStreamQualityMetadata
 import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathState
 import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathTracker
 import moe.ouom.neriplayer.core.player.usb.session.UsbExclusiveSessionController
@@ -218,19 +225,23 @@ import moe.ouom.neriplayer.data.settings.DEFAULT_CLOUD_MUSIC_LYRIC_OFFSET_MS
 import moe.ouom.neriplayer.data.settings.DEFAULT_QQ_MUSIC_LYRIC_OFFSET_MS
 import moe.ouom.neriplayer.data.settings.PlaybackPreferenceSnapshot
 import moe.ouom.neriplayer.data.settings.UsbExclusivePreferences
+import moe.ouom.neriplayer.data.settings.resolveEffectiveLyricOffsetMs
 import moe.ouom.neriplayer.listentogether.mapping.buildStableTrackKey
 import moe.ouom.neriplayer.listentogether.mapping.resolvedAudioId
 import moe.ouom.neriplayer.listentogether.mapping.resolvedChannelId
 import moe.ouom.neriplayer.listentogether.mapping.resolvedPlaylistContextId
 import moe.ouom.neriplayer.listentogether.mapping.resolvedSubAudioId
+import moe.ouom.neriplayer.listentogether.playback.authoritativeStreamUrlForCurrentTrack
+import moe.ouom.neriplayer.listentogether.playback.currentStableKey
 import moe.ouom.neriplayer.listentogether.playback.shouldHoldListenTogetherPlaybackForSafetyPause
-import moe.ouom.neriplayer.listentogether.playback.shouldUseListenTogetherListenerSafetyPause
+import moe.ouom.neriplayer.listentogether.playback.shouldMuteListenTogetherListenerForAudioRouteLoss
 import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherChannels
 import moe.ouom.neriplayer.listentogether.session.resolveListenTogetherSessionRole
 import moe.ouom.neriplayer.ui.component.lyrics.LyricEntry
 import moe.ouom.neriplayer.ui.viewmodel.playlist.BiliVideoItem
 import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.core.logging.NPLogger
+import moe.ouom.neriplayer.core.player.playback.stopPlaybackImmediatelyImpl
 import moe.ouom.neriplayer.util.platform.LanguageManager
 import java.io.File
 import java.io.RandomAccessFile
@@ -284,7 +295,8 @@ object PlayerManager {
     @Volatile
     internal var interactiveNowPlayingVisible: Boolean = false
 
-    internal lateinit var cache: Cache
+    @Volatile
+    internal var cache: Cache? = null
     internal var conditionalHttpFactory: ConditionalHttpDataSourceFactory? = null
 
     // Helper function to get localized string
@@ -312,7 +324,10 @@ object PlayerManager {
     internal var ioScope = newIoScope()
     internal var mainScope = newMainScope()
     internal var progressJob: Job? = null
-    internal var lyriconUpdateJob: Job? = null
+    internal var playbackRuntimeWatchdogJob: Job? = null
+    @Volatile
+    internal var playbackRuntimeWatchdogToken = 0L
+    private val lyriconUpdateCoordinator = LyriconUpdateCoordinator()
     internal var externalBluetoothLyricsLoadJob: Job? = null
     internal var externalBluetoothTranslationLoadJob: Job? = null
     internal var volumeFadeJob: Job? = null
@@ -325,7 +340,12 @@ object PlayerManager {
     @Volatile
     internal var playbackStartupWatchdogToken = 0L
     internal var bluetoothDisconnectPauseJob: Job? = null
+    @Volatile
     internal var audioRouteMuteRestoreVolume: Float? = null
+    @Volatile
+    internal var audioRouteMuteRequiresExplicitRestore = false
+    internal val _audioRouteMuteSuppressedFlow = MutableStateFlow(false)
+    val audioRouteMuteSuppressedFlow: StateFlow<Boolean> = _audioRouteMuteSuppressedFlow
     @Volatile
     internal var listenTogetherSafetyPausePendingResume = false
     @Volatile
@@ -415,9 +435,9 @@ object PlayerManager {
     internal var mobileDataNeteaseAudioQuality: String = "standard"
     internal var mobileDataYouTubeAudioQuality: String = "low"
     internal var mobileDataBiliAudioQuality: String = "low"
+    internal var playbackFadeInEnabled = true
+    internal var playbackCrossfadeNextEnabled = true
     internal var mobileDatakuGouPreferredQuality: String = "128"
-    internal var playbackFadeInEnabled = false
-    internal var playbackCrossfadeNextEnabled = false
     internal var playbackFadeInDurationMs = DEFAULT_FADE_DURATION_MS
     internal var playbackFadeOutDurationMs = DEFAULT_FADE_DURATION_MS
     internal var playbackCrossfadeInDurationMs = DEFAULT_FADE_DURATION_MS
@@ -485,10 +505,12 @@ object PlayerManager {
     internal const val PENDING_SEEK_POSITION_TOLERANCE_MS = 1_500L
     internal const val STARTUP_STALL_POSITION_TOLERANCE_MS = 500L
     internal const val STARTUP_STALL_LOCAL_TIMEOUT_MS = 5_000L
-    internal const val STARTUP_STALL_REMOTE_TIMEOUT_MS = 12_000L
+    internal const val STARTUP_STALL_REMOTE_TIMEOUT_MS = 10_000L
     internal const val STARTUP_STALL_YOUTUBE_TIMEOUT_MS = 25_000L
     internal const val STARTUP_STALL_YOUTUBE_DEEP_SEEK_TIMEOUT_MS = 5_000L
     internal const val STARTUP_STALL_READY_EARLY_TIMEOUT_MS = 5_000L
+    internal const val STARTUP_STALL_BUFFERING_EARLY_TIMEOUT_MS = 5_000L
+    internal const val STARTUP_STALL_BUFFERING_GRACE_MS = 2_000L
     internal const val STARTUP_STALL_USB_EARLY_TIMEOUT_MS = 4_000L
     internal const val STARTUP_STALL_MAX_RECOVERY_ATTEMPTS = 3
     internal const val QUALITY_CHANGE_REFRESH_DEBOUNCE_MS = 0L
@@ -663,6 +685,9 @@ object PlayerManager {
     internal var startupStallRecoveryAttempts = 0
     internal var playbackProgressBaselinePositionMs = 0L
     internal var playbackProgressAdvanceReported = false
+    internal var playbackRuntimeStallRecoveryAttempts = 0
+    internal var playbackRuntimeLastProgressPositionMs = 0L
+    internal var playbackRuntimeLastProgressAtElapsedRealtimeMs = 0L
     internal var lastHandledTrackEndKey: String? = null
     internal var lastTrackEndHandledAtMs = 0L
     val audioLevelFlow get() = AudioReactive.level
@@ -797,27 +822,82 @@ object PlayerManager {
         )
     }
 
-    internal fun syncLyriconSong(song: SongItem?) {
-        lyriconUpdateJob?.cancel()
-        if (!lyriconEnabled) {
-            lyriconUpdateJob = null
-            LyriconManager.setPlaybackState(false)
-            return
-        }
-        if (song == null) {
-            lyriconUpdateJob = null
-            LyriconManager.setPlaybackState(false)
-            LyriconManager.setPosition(0L)
-            return
-        }
-        LyriconManager.updateSong(song, lyrics = null, translatedLyrics = null)
-        lyriconUpdateJob = ioScope.launch {
-            val lyrics = getLyrics(song)
-            val translatedLyrics = getTranslatedLyrics(song)
-            if (_currentSongFlow.value?.sameIdentityAs(song) == true) {
-                LyriconManager.updateSong(song, lyrics, translatedLyrics)
-            }
-        }
+    internal fun syncLyriconSong(
+        song: SongItem?,
+        lyricOffsetOverrideMs: Long? = null,
+    ) {
+        val request = lyriconUpdateCoordinator.replace(
+            createJob = { updateGeneration ->
+                if (!lyriconEnabled || song == null) {
+                    null
+                } else {
+                    ioScope.launch(start = CoroutineStart.LAZY) lyriconUpdate@{
+                        val lyrics = getLyrics(song)
+                        currentCoroutineContext().ensureActive()
+                        val translatedLyrics = getTranslatedLyrics(song)
+                        currentCoroutineContext().ensureActive()
+                        val updateJob = currentCoroutineContext()[Job] ?: return@lyriconUpdate
+                        lyriconUpdateCoordinator.runIfCurrent(
+                            generation = updateGeneration,
+                            job = updateJob,
+                        ) {
+                            val currentSong = _currentSongFlow.value
+                            if (currentSong?.sameIdentityAs(song) == true) {
+                                LyriconManager.updateSong(
+                                    song = currentSong,
+                                    lyrics = lyrics,
+                                    translatedLyrics = translatedLyrics,
+                                    lyricOffsetMs = lyricOffsetOverrideMs
+                                        ?: resolveLyriconLyricOffsetMs(currentSong),
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            onPublished = {
+                when {
+                    !lyriconEnabled -> LyriconManager.setPlaybackState(false)
+                    song == null -> {
+                        LyriconManager.setPlaybackState(false)
+                        updateLyriconLyricOffset(null)
+                        LyriconManager.setPosition(0L)
+                    }
+                    else -> LyriconManager.updateSong(
+                        song = song,
+                        lyrics = null,
+                        translatedLyrics = null,
+                        lyricOffsetMs = lyricOffsetOverrideMs
+                            ?: resolveLyriconLyricOffsetMs(song),
+                    )
+                }
+            },
+        )
+        request.job?.start()
+    }
+
+    internal fun cancelLyriconUpdate() {
+        lyriconUpdateCoordinator.cancelActive()
+    }
+
+    internal fun hasPendingLyriconUpdate(): Boolean {
+        return lyriconUpdateCoordinator.hasPendingJob()
+    }
+
+    internal fun updateLyriconLyricOffset(song: SongItem? = _currentSongFlow.value) {
+        if (!lyriconEnabled) return
+        val lyricOffsetMs = song?.let { resolveLyriconLyricOffsetMs(it) } ?: 0L
+        LyriconManager.setLyricOffset(lyricOffsetMs)
+        LyriconManager.setPosition(song?.let { _playbackPositionMs.value } ?: 0L)
+    }
+
+    private fun resolveLyriconLyricOffsetMs(song: SongItem): Long {
+        return resolveEffectiveLyricOffsetMs(
+            lyricSource = song.matchedLyricSource,
+            cloudMusicDefaultOffsetMs = cloudMusicLyricDefaultOffsetMs,
+            qqMusicDefaultOffsetMs = qqMusicLyricDefaultOffsetMs,
+            userLyricOffsetMs = song.userLyricOffsetMs,
+        )
     }
 
     internal fun isApplicationInitialized(): Boolean = this::application.isInitialized
@@ -833,7 +913,7 @@ object PlayerManager {
 
     internal fun isPlayerInitialized(): Boolean = this::player.isInitialized
 
-    internal fun isCacheInitialized(): Boolean = this::cache.isInitialized
+    internal fun isCacheInitialized(): Boolean = cache != null
 
     internal fun syncPlaybackControlPlayingState() {
         _playbackControlPlayingFlow.value = shouldShowPauseButtonForPlaybackControls(
@@ -1231,12 +1311,10 @@ object PlayerManager {
         ) == "controller"
     }
 
-    internal fun shouldUseListenTogetherListenerSafetyPause(): Boolean {
-        val room = activeListenTogetherRoomState()
-        return shouldUseListenTogetherListenerSafetyPause(
+    internal fun shouldMuteListenTogetherListenerForAudioRouteLoss(): Boolean {
+        return shouldMuteListenTogetherListenerForAudioRouteLoss(
             listenTogetherActive = isListenTogetherActive(),
-            isCurrentUserController = isCurrentUserControllerInListenTogether(),
-            allowMemberControl = room?.settings?.allowMemberControl
+            isCurrentUserController = isCurrentUserControllerInListenTogether()
         )
     }
 
@@ -1280,12 +1358,12 @@ object PlayerManager {
 
     internal fun currentListenTogetherTargetStableKey(): String? {
         val room = activeListenTogetherRoomState() ?: return null
-        return room.track?.stableKey ?: room.queue.getOrNull(room.currentIndex)?.stableKey
+        return room.currentStableKey()
     }
 
     internal fun currentListenTogetherTargetStreamUrl(): String? {
         val room = activeListenTogetherRoomState() ?: return null
-        return room.track?.streamUrl ?: room.queue.getOrNull(room.currentIndex)?.streamUrl
+        return room.authoritativeStreamUrlForCurrentTrack()
     }
 
     internal fun SongItem.listenTogetherStableKeyOrNull(): String? {
@@ -1300,14 +1378,55 @@ object PlayerManager {
     }
 
     internal fun shouldWaitForListenTogetherAuthoritativeStream(song: SongItem): Boolean {
+        if (!isListenTogetherAuthoritativeStreamTarget(song)) return false
+        if (isListenTogetherAuthoritativeStreamConfirmedUnavailable(song)) return false
+        return !isDirectStreamUrl(currentListenTogetherTargetStreamUrl())
+    }
+
+    internal fun shouldAwaitListenTogetherSharedStreamFallback(
+        song: SongItem,
+        localResolutionRequiresSharedStream: Boolean
+    ): Boolean {
+        return moe.ouom.neriplayer.listentogether.playback
+            .shouldAwaitListenTogetherSharedStreamFallback(
+                listenerAudioLinkSharingActive = isListenTogetherAudioLinkFallbackEnabled(),
+                localResolutionRequiresSharedStream = localResolutionRequiresSharedStream,
+                controllerLinkConfirmedUnavailable =
+                    isListenTogetherAuthoritativeStreamConfirmedUnavailable(song),
+                hasAuthoritativeStream = isDirectStreamUrl(currentListenTogetherTargetStreamUrl())
+            )
+    }
+
+    internal fun isListenTogetherAudioLinkFallbackEnabled(): Boolean {
         if (!isListenTogetherActive()) return false
         if (isCurrentUserControllerInListenTogether()) return false
         val room = activeListenTogetherRoomState() ?: return false
-        if (!room.settings.shareAudioLinks || room.roomStatus != "active") return false
-        if (isDirectStreamUrl(currentListenTogetherTargetStreamUrl())) return false
+        return room.settings.shareAudioLinks && room.roomStatus == "active"
+    }
+
+    internal fun isListenTogetherLocalResolutionPendingFor(song: SongItem): Boolean {
+        val targetStableKey = song.listenTogetherStableKeyOrNull() ?: return false
+        return isPendingMediaLoadActive() &&
+            playJob?.isActive == true &&
+            _currentSongFlow.value?.listenTogetherStableKeyOrNull() == targetStableKey
+    }
+
+    internal fun isListenTogetherAuthoritativeStreamTarget(song: SongItem): Boolean {
+        if (!isListenTogetherAudioLinkFallbackEnabled()) return false
+        activeListenTogetherRoomState() ?: return false
         val targetStableKey = currentListenTogetherTargetStableKey() ?: return false
         val songStableKey = song.listenTogetherStableKeyOrNull() ?: return false
         return songStableKey == targetStableKey
+    }
+
+    internal fun isListenTogetherAuthoritativeStreamConfirmedUnavailable(song: SongItem): Boolean {
+        if (!isListenTogetherAuthoritativeStreamTarget(song)) return false
+        val room = activeListenTogetherRoomState() ?: return false
+        val songStableKey = song.listenTogetherStableKeyOrNull() ?: return false
+        return AppContainer.listenTogetherSessionManager.isControllerAudioLinkUnavailable(
+            roomId = room.roomId,
+            stableKey = songStableKey
+        )
     }
 
     internal fun stopCurrentPlaybackForListenTogetherAwaitingStream() {
@@ -1327,6 +1446,8 @@ object PlayerManager {
         _isPlayingFlow.value = false
         _currentMediaUrl.value = null
         currentMediaUrlResolvedAtMs = 0L
+        pendingMediaLoadActive = false
+        pendingMediaLoadPositionMs = 0L
         clearPendingSeekPosition()
         _playbackPositionMs.value = 0L
     }
@@ -2303,8 +2424,34 @@ object PlayerManager {
                     "bili-$biliSongId-${effectiveBiliQuality()}"
                 }
             }
-            else -> "netease-${song.id}-${effectiveNeteaseQuality()}"
+            else -> buildNeteasePlaybackCacheKey(
+                songId = song.id,
+                preferredQuality = effectiveNeteaseQuality(),
+                useFallbackNamespace = neteaseAutoSourceSwitchEnabled ||
+                    neteaseLocalSourceFallbackEnabled
+            )
         }
+    }
+
+    internal fun buildNeteasePlaybackCacheKey(
+        songId: Long,
+        preferredQuality: String,
+        useFallbackNamespace: Boolean
+    ): String {
+        val quality = preferredQuality.trim().lowercase().ifBlank { "exhigh" }
+        return if (useFallbackNamespace) {
+            "netease-$songId-$quality-fallback-v1"
+        } else {
+            "netease-$songId-$quality"
+        }
+    }
+
+    internal fun buildNeteasePreviewCacheKey(
+        songId: Long,
+        preferredQuality: String
+    ): String {
+        val quality = preferredQuality.trim().lowercase().ifBlank { "exhigh" }
+        return "netease-preview-v1-$songId-$quality"
     }
 
     /**
@@ -2327,23 +2474,33 @@ object PlayerManager {
         song: SongItem,
         url: String,
         cacheKey: String,
-        mimeType: String? = null
+        mimeType: String? = null,
+        allowCustomCacheKey: Boolean = true
     ): MediaItem {
+        val mediaUrl = stripListenTogetherStreamQualityMetadata(url)
+        val mediaUri = mediaUrl.toUri()
         val isLocalFile =
-            url.startsWith("file://") ||
-                url.startsWith("content://") ||
-                url.startsWith("android.resource://") ||
-                url.startsWith("/")
+            mediaUrl.startsWith("file://") ||
+            mediaUrl.startsWith("content://") ||
+            mediaUrl.startsWith("android.resource://") ||
+            mediaUrl.startsWith("/")
+        if (mediaUri.path?.endsWith(".flac", ignoreCase = true) == true) {
+            NPLogger.d(
+                "NERI-PlayerManager",
+                "build FLAC media item: songId=${song.id}, host=${mediaUri.host ?: "local"}, " +
+                    "declaredMimeType=${mimeType ?: "missing"}, cacheKey=$cacheKey"
+            )
+        }
         return MediaItem.Builder()
             .setMediaId("${song.id}|${song.album}|${song.mediaUri.orEmpty()}")
-            .setUri(url.toUri())
+            .setUri(mediaUri)
             .apply {
                 if (!mimeType.isNullOrBlank()) {
                     setMimeType(mimeType)
                 }
                 // Local files do not need a custom cache key.
-                if (!isLocalFile) {
-                    setCustomCacheKey(cacheKey)
+                if (!isLocalFile && allowCustomCacheKey) {
+                    safeCustomPlaybackCacheKey(cacheKey)?.let(::setCustomCacheKey)
                 }
             }
             .build()
@@ -2481,6 +2638,8 @@ object PlayerManager {
 
     fun togglePlayPause() = this.togglePlayPauseImpl()
 
+    internal fun restoreAudioRouteMute() = this.restoreAudioRouteMuteImpl()
+
     fun togglePlayPauseWithoutFade() = this.togglePlayPauseImpl(allowFade = false)
 
     fun seekTo(
@@ -2512,6 +2671,11 @@ object PlayerManager {
     ) = this.applyListenTogetherPlaybackModeImpl(repeatMode, shuffleEnabled)
 
     internal fun stopProgressUpdates() = this.stopProgressUpdatesImpl()
+
+    internal fun stopPlaybackImmediately(
+        reason: String,
+        forcePersist: Boolean = true
+    ) = this.stopPlaybackImmediatelyImpl(reason, forcePersist)
 
     internal fun stopPlaybackPreservingQueue(clearMediaUrl: Boolean = false) =
         this.stopPlaybackPreservingQueueImpl(clearMediaUrl)

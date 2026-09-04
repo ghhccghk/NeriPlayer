@@ -419,7 +419,11 @@ class SettingsRepository(private val context: Context) {
         }
 
     val maxCacheSizeBytesFlow: Flow<Long> =
-        dataStoreSettingFlow { it[SettingsKeys.MAX_CACHE_SIZE_BYTES] ?: (1024L * 1024 * 1024) }
+        dataStoreSettingFlow {
+            CacheSizePolicy.normalizeCacheSizeBytes(
+                it[SettingsKeys.MAX_CACHE_SIZE_BYTES] ?: (1024L * 1024 * 1024)
+            )
+        }
 
     val showLyricTranslationFlow: Flow<Boolean> =
         autoSettingsRepository.showLyricTranslationFlow
@@ -449,10 +453,10 @@ class SettingsRepository(private val context: Context) {
         autoSettingsRepository.homeCardRecommendedFlow
 
     val playbackFadeInFlow: Flow<Boolean> =
-        dataStoreSettingFlow { it[SettingsKeys.PLAYBACK_FADE_IN] ?: false }
+        dataStoreSettingFlow { it[SettingsKeys.PLAYBACK_FADE_IN] ?: true }
 
     val playbackCrossfadeNextFlow: Flow<Boolean> =
-        dataStoreSettingFlow { it[SettingsKeys.PLAYBACK_CROSSFADE_NEXT] ?: false }
+        dataStoreSettingFlow { it[SettingsKeys.PLAYBACK_CROSSFADE_NEXT] ?: true }
 
     val sleepTimerFinishCurrentOnExpiryFlow: Flow<Boolean> =
         dataStoreSettingFlow {
@@ -1031,7 +1035,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setMaxCacheSizeBytes(bytes: Long) {
-        val normalized = bytes.coerceAtLeast(0L)
+        val normalized = CacheSizePolicy.normalizeCacheSizeBytes(bytes)
         context.dataStore.edit { it[SettingsKeys.MAX_CACHE_SIZE_BYTES] = normalized }
         updatePlaybackPreferenceSnapshot(context) { it.copy(maxCacheSizeBytes = normalized) }
     }

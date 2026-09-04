@@ -128,9 +128,15 @@ private const val MANUAL_LYRIC_PRESENTATION_DURATION_MS = 280
 private const val JAPANESE_LYRIC_TRANSLATION_EXTRA_GAP_DP = 3f
 private const val LYRIC_LINE_HEIGHT_MULTIPLIER = 1.18f
 private const val LYRIC_TRANSLATION_LINE_HEIGHT_MULTIPLIER = 1.12f
+private val ACTIVE_LYRIC_REVEAL_HORIZONTAL_PADDING = 4.dp
 
 private data class LyricInkMetrics(
     val coverage: Float
+)
+
+internal data class LyricRevealClipBounds(
+    val left: Float,
+    val right: Float
 )
 
 internal fun shouldAnimateLyricItemPlacement(): Boolean {
@@ -201,6 +207,38 @@ internal fun resolveLyricScrollSessionKey(
 
 internal fun resolveEmbeddedLyricScale(isActive: Boolean): Float {
     return if (isActive) EMBEDDED_ACTIVE_LINE_SCALE else EMBEDDED_INACTIVE_LINE_SCALE
+}
+
+internal fun resolveEmbeddedLyricHorizontalOverflowPadding(
+    maxTextWidth: Dp,
+    maxLineScale: Float
+): Dp {
+    val width = maxTextWidth.value
+    if (!width.isFinite() || width <= 0f || !maxLineScale.isFinite() || maxLineScale <= 1f) {
+        return 0.dp
+    }
+    return (width * (maxLineScale - 1f) / 2f).dp
+}
+
+internal fun resolveActiveLyricRevealHorizontalPadding(): Dp {
+    return ACTIVE_LYRIC_REVEAL_HORIZONTAL_PADDING
+}
+
+internal fun resolveLyricRevealClipBounds(
+    lineLeft: Float,
+    lineRight: Float,
+    horizontalBleedPx: Float,
+    containerWidth: Float
+): LyricRevealClipBounds {
+    val safeContainerWidth = containerWidth.takeIf { it.isFinite() && it > 0f }
+        ?: lineRight.coerceAtLeast(lineLeft)
+    val safeBleed = horizontalBleedPx.takeIf { it.isFinite() && it > 0f } ?: 0f
+    val safeLeft = lineLeft.coerceIn(0f, safeContainerWidth)
+    val safeRight = lineRight.coerceIn(safeLeft, safeContainerWidth)
+    return LyricRevealClipBounds(
+        left = (safeLeft - safeBleed).coerceAtLeast(0f),
+        right = (safeRight + safeBleed).coerceAtMost(safeContainerWidth)
+    )
 }
 
 internal fun resolveEmbeddedTranslationTransformOrigin(): TransformOrigin {
@@ -446,7 +484,11 @@ private val LrcCreditLineRegex = Regex(
 
 private data class LrcTimelineEntry(
     val startTimeMs: Long,
-    val text: String
+    val text: String,
+    val words: List<EnhancedLrcWord>? = null,
+    val explicitEndTimeMs: Long? = null,
+    val sourceLineIndex: Int = 0,
+    val timestampIndex: Int = 0
 )
 
 private data class EnhancedLrcWord(
@@ -824,6 +866,16 @@ fun SyncedLyricsView(
     ) {
         val centerPad = maxHeight / 2.5f
         val maxTextWidth = (maxWidth - 48.dp).coerceAtLeast(0.dp)
+        val embeddedOverflowPadding = resolveEmbeddedLyricHorizontalOverflowPadding(
+            maxTextWidth = maxTextWidth,
+            maxLineScale = if (visualEffectsEnabled) {
+                1f
+            } else {
+                resolveEmbeddedLyricScale(isActive = true)
+            }
+        )
+        val constrainedTextWidth = (maxTextWidth - embeddedOverflowPadding * 2)
+            .coerceAtLeast(0.dp)
         val density = LocalDensity.current
 
         LazyColumn(
@@ -857,7 +909,8 @@ fun SyncedLyricsView(
                                 Modifier.animateItem(placementSpec = null)
                             }
                         )
-                        .widthIn(max = maxTextWidth),
+                        .padding(horizontal = embeddedOverflowPadding)
+                        .widthIn(max = constrainedTextWidth),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     val distance = abs(index - currentIndex)
@@ -1310,6 +1363,110 @@ private fun parseLrcTimestampMs(timestamp: MatchResult): Long? {
     return minutes * 60_000L + seconds * 1_000L + milliseconds
 }
 
+private fun parseSquareBracketLrcTimelineEntries(
+    rawLine: String,
+    sourceLineIndex: Int
+): List<LrcTimelineEntry> {
+    val line = rawLine.trim()
+    val timestamps = EnhancedLrcLineTimestampRegex.findAll(line).toList()
+    if (timestamps.isEmpty() || timestamps.first().range.first != 0) {
+        return emptyList()
+    }
+
+    var leadingTimestampCount = 1
+    var nextExpectedStart = timestamps.first().range.last + 1
+    while (
+        leadingTimestampCount < timestamps.size &&
+        timestamps[leadingTimestampCount].range.first == nextExpectedStart
+    ) {
+        nextExpectedStart = timestamps[leadingTimestampCount].range.last + 1
+        leadingTimestampCount++
+    }
+
+    val primaryTimestampIndex = leadingTimestampCount - 1
+    val primaryTimestamp = timestamps[primaryTimestampIndex]
+    val primaryStartTimeMs = parseLrcTimestampMs(primaryTimestamp) ?: return emptyList()
+    val inlineTimestamps = timestamps.drop(leadingTimestampCount)
+    val fragments = buildList {
+        val firstTextEnd = inlineTimestamps.firstOrNull()?.range?.first ?: line.length
+        add(
+            EnhancedLrcWord(
+                text = line.substring(primaryTimestamp.range.last + 1, firstTextEnd),
+                startTimeMs = primaryStartTimeMs,
+                endTimeMs = inlineTimestamps.firstOrNull()?.let(::parseLrcTimestampMs)
+            )
+        )
+        inlineTimestamps.forEachIndexed { index, timestamp ->
+            val textStart = timestamp.range.last + 1
+            val textEnd = inlineTimestamps.getOrNull(index + 1)?.range?.first ?: line.length
+            add(
+                EnhancedLrcWord(
+                    text = line.substring(textStart, textEnd),
+                    startTimeMs = parseLrcTimestampMs(timestamp) ?: return@forEachIndexed,
+                    endTimeMs = inlineTimestamps.getOrNull(index + 1)
+                        ?.let(::parseLrcTimestampMs)
+                )
+            )
+        }
+    }
+    val visibleFragments = fragments.filterIndexed { index, fragment ->
+        fragment.text.isNotEmpty() &&
+            (index != 0 || fragment.text.any { !it.isWhitespace() })
+    }
+
+    if (visibleFragments.size >= 2) {
+        return listOf(
+            LrcTimelineEntry(
+                startTimeMs = primaryStartTimeMs,
+                text = visibleFragments.joinToString(separator = "") { it.text },
+                words = visibleFragments,
+                sourceLineIndex = sourceLineIndex,
+                timestampIndex = primaryTimestampIndex
+            )
+        )
+    }
+
+    val text = visibleFragments.singleOrNull()?.text?.trim().orEmpty()
+    val explicitEndTimeMs = visibleFragments.singleOrNull()?.endTimeMs
+    return timestamps.take(leadingTimestampCount).mapIndexedNotNull { timestampIndex, timestamp ->
+        val startTimeMs = parseLrcTimestampMs(timestamp) ?: return@mapIndexedNotNull null
+        LrcTimelineEntry(
+            startTimeMs = startTimeMs,
+            text = text,
+            explicitEndTimeMs = explicitEndTimeMs.takeIf { leadingTimestampCount == 1 },
+            sourceLineIndex = sourceLineIndex,
+            timestampIndex = timestampIndex
+        )
+    }
+}
+
+private fun foldAdjacentSquareBracketTranslations(
+    entries: List<LyricEntry>
+): List<LyricEntry> {
+    val foldedEntries = mutableListOf<LyricEntry>()
+    var index = 0
+    while (index < entries.size) {
+        val entry = entries[index]
+        val followingEntry = entries.getOrNull(index + 1)
+        val followingText = followingEntry?.text.orEmpty()
+        val isAdjacentTranslation =
+            !entry.words.isNullOrEmpty() &&
+                followingEntry?.words.isNullOrEmpty() &&
+                followingEntry?.startTimeMs == entry.startTimeMs &&
+                followingText.isNotBlank() &&
+                !LrcCreditLineRegex.containsMatchIn(followingText) &&
+                !isLyricCreditMetadataLine(followingText)
+        if (isAdjacentTranslation) {
+            foldedEntries += entry.copy(translation = followingText)
+            index += 2
+        } else {
+            foldedEntries += entry
+            index++
+        }
+    }
+    return foldedEntries
+}
+
 /** 小数字符偏移的多行 reveal */
 @Composable
 internal fun Modifier.multilineGradientReveal(
@@ -1319,7 +1476,8 @@ internal fun Modifier.multilineGradientReveal(
     fadeWidth: Dp,
     line: LyricEntry? = null,
     interpolatedPositionState: InterpolatedPlaybackPositionState? = null,
-    lyricOffsetMs: Long = 0L
+    lyricOffsetMs: Long = 0L,
+    horizontalContentInset: Dp = 0.dp
 ): Modifier = this
     .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
     .drawWithContent {
@@ -1346,18 +1504,27 @@ internal fun Modifier.multilineGradientReveal(
 
         val safeChars = effectiveRevealOffsetChars.coerceIn(0f, textLength.toFloat())
         val totalLines = layout.lineCount
+        val horizontalInsetPx = horizontalContentInset.toPx()
 
         // 遍历所有行, 分三种情况处理, 已完成行, 当前行, 未开始行
         for (lineIndex in 0 until totalLines) {
             val lineStartIdx = layout.getLineStart(lineIndex) // 该行第一个字符的索引
             val lineEndIdx = layout.getLineEnd(lineIndex, true) // 该行最后一个字符的索引 (含换行符)
+            val rawLineLeft = layout.getLineLeft(lineIndex) + horizontalInsetPx
+            val rawLineRight = layout.getLineRight(lineIndex) + horizontalInsetPx
+            val lineClipBounds = resolveLyricRevealClipBounds(
+                lineLeft = rawLineLeft,
+                lineRight = rawLineRight,
+                horizontalBleedPx = horizontalInsetPx,
+                containerWidth = size.width
+            )
 
             // 进度超过该行最后一个字符, 直接绘制全高亮
             if (safeChars >= lineEndIdx) {
                 clipRect(
-                    left = layout.getLineLeft(lineIndex),
+                    left = lineClipBounds.left,
                     top = layout.getLineTop(lineIndex),
-                    right = layout.getLineRight(lineIndex),
+                    right = lineClipBounds.right,
                     bottom = layout.getLineBottom(lineIndex)
                 ) {
                     this@drawWithContent.drawContent()
@@ -1372,9 +1539,12 @@ internal fun Modifier.multilineGradientReveal(
                 // 计算当前字符和下一个字符的X坐标
                 // 使用 getBoundingBox 获取更准确的字符边界, 避免字体渲染偏移
                 val x0 = try {
-                    layout.getBoundingBox(currentCharIdx).left
+                    layout.getBoundingBox(currentCharIdx).left + horizontalInsetPx
                 } catch (e: Exception) {
-                    layout.getHorizontalPosition(currentCharIdx, usePrimaryDirection = true)
+                    layout.getHorizontalPosition(
+                        currentCharIdx,
+                        usePrimaryDirection = true
+                    ) + horizontalInsetPx
                 }
                 val nextCharIdx = if (currentCharIdx >= lineEndIdx - 1) {
                     lineEndIdx // 该行最后一个字符，下一个字符指向行尾
@@ -1382,18 +1552,21 @@ internal fun Modifier.multilineGradientReveal(
                     currentCharIdx + 1
                 }
                 val x1 = if (currentCharIdx >= lineEndIdx - 1) {
-                    layout.getLineRight(lineIndex) // 该行最后一个字符，X1取行右边界
+                    rawLineRight // 该行最后一个字符，X1取行右边界
                 } else {
                     try {
-                        layout.getBoundingBox(nextCharIdx).left
+                        layout.getBoundingBox(nextCharIdx).left + horizontalInsetPx
                     } catch (e: Exception) {
-                        layout.getHorizontalPosition(nextCharIdx, usePrimaryDirection = true)
+                        layout.getHorizontalPosition(
+                            nextCharIdx,
+                            usePrimaryDirection = true
+                        ) + horizontalInsetPx
                     }
                 }
 
                 // 确保X坐标在当前行范围内
-                val lineLeft = layout.getLineLeft(lineIndex)
-                val lineRight = layout.getLineRight(lineIndex)
+                val lineLeft = lineClipBounds.left
+                val lineRight = lineClipBounds.right
                 val x = (x0 + (x1 - x0) * frac).coerceIn(lineLeft, lineRight)
 
                 // 计算渐变范围
@@ -1516,11 +1689,13 @@ fun SyncedLyricsActiveLine(
     )
 
     val effectiveFadeWidth = if (line.words.isNullOrEmpty()) fadeWidth else 0.dp
+    val revealHorizontalPadding = resolveActiveLyricRevealHorizontalPadding()
 
     Box {
         // 底版文本
         Text(
             text = line.text,
+            modifier = Modifier.padding(horizontal = revealHorizontalPadding),
             style = textStyle.copy(color = inactiveColor),
             maxLines = Int.MAX_VALUE,
             softWrap = true,
@@ -1539,19 +1714,22 @@ fun SyncedLyricsActiveLine(
                 style = textStyle.copy(color = activeColor),
                 maxLines = Int.MAX_VALUE,
                 softWrap = true,
-                modifier = Modifier.multilineGradientReveal(
-                    layout = layout,
-                    revealOffsetChars = revealOffsetChars,
-                    textLength = line.text.length,
-                    fadeWidth = effectiveFadeWidth,
-                    line = line,
-                    interpolatedPositionState = if (interpolatePlaybackPosition) {
-                        interpolatedPositionState
-                    } else {
-                        null
-                    },
-                    lyricOffsetMs = lyricOffsetMs
-                )
+                modifier = Modifier
+                    .multilineGradientReveal(
+                        layout = layout,
+                        revealOffsetChars = revealOffsetChars,
+                        textLength = line.text.length,
+                        fadeWidth = effectiveFadeWidth,
+                        line = line,
+                        interpolatedPositionState = if (interpolatePlaybackPosition) {
+                            interpolatedPositionState
+                        } else {
+                            null
+                        },
+                        lyricOffsetMs = lyricOffsetMs,
+                        horizontalContentInset = revealHorizontalPadding
+                    )
+                    .padding(horizontal = revealHorizontalPadding)
             )
         }
     }
@@ -1595,29 +1773,24 @@ fun parseNeteaseLrc(lrc: String): List<LyricEntry> {
     if (isEnhancedLrc(normalizedLrc)) {
         return parseEnhancedLrc(normalizedLrc)
     }
-    val tag = Regex("""\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?]""")
     val timeline = mutableListOf<LrcTimelineEntry>()
 
-    normalizedLrc.lineSequence().forEach { raw ->
+    normalizedLrc.lineSequence().forEachIndexed { sourceLineIndex, raw ->
         val line = raw.trim()
-        if (line.isEmpty()) return@forEach
-        if (line.startsWith("{") || line.startsWith("}")) return@forEach // 过滤 JSON 段
+        if (line.isEmpty()) return@forEachIndexed
+        if (line.startsWith("{") || line.startsWith("}")) return@forEachIndexed // 过滤 JSON 段
 
-        val m = tag.find(line) ?: return@forEach
-        val mm = m.groupValues[1].toInt()
-        val ss = m.groupValues[2].toInt()
-        val msStr = m.groupValues.getOrNull(3).orEmpty()
-        val ms = when (msStr.length) {
-            0 -> 0
-            2 -> msStr.toInt() * 10
-            else -> msStr.toInt()
-        }
-        val time = mm * 60_000L + ss * 1_000L + ms
-        val text = line.substring(m.range.last + 1).trim()
-        timeline.add(LrcTimelineEntry(startTimeMs = time, text = text))
+        timeline += parseSquareBracketLrcTimelineEntries(
+            rawLine = line,
+            sourceLineIndex = sourceLineIndex
+        )
     }
 
-    timeline.sortBy { it.startTimeMs }
+    timeline.sortWith(
+        compareBy<LrcTimelineEntry> { it.startTimeMs }
+            .thenBy { it.sourceLineIndex }
+            .thenBy { it.timestampIndex }
+    )
     val suffixContainsOnlyCredits = BooleanArray(timeline.size + 1)
     suffixContainsOnlyCredits[timeline.size] = true
     for (index in timeline.lastIndex downTo 0) {
@@ -1646,19 +1819,41 @@ fun parseNeteaseLrc(lrc: String): List<LyricEntry> {
     for (index in effectiveTimeline.lastIndex downTo 0) {
         val entry = effectiveTimeline[index]
         if (entry.text.isNotBlank()) {
+            val nextDistinctTimestampMs = effectiveTimeline
+                .asSequence()
+                .drop(index + 1)
+                .firstOrNull { it.startTimeMs > entry.startTimeMs }
+                ?.startTimeMs
+            val words = entry.words?.let { sourceWords ->
+                sourceWords.mapIndexed { wordIndex, word ->
+                    val fallbackEndTimeMs = sourceWords.getOrNull(wordIndex + 1)?.startTimeMs
+                        ?: nextDistinctTimestampMs
+                        ?: entry.startTimeMs.saturatingAdd(5_000L)
+                    WordTiming(
+                        startTimeMs = word.startTimeMs,
+                        endTimeMs = (word.endTimeMs ?: fallbackEndTimeMs)
+                            .coerceAtLeast(word.startTimeMs),
+                        charCount = word.text.length
+                    )
+                }
+            }
+            val endTimeMs = words?.maxOfOrNull { it.endTimeMs }
+                ?: entry.explicitEndTimeMs
+                ?: nextTimestampMs
+                ?: entry.startTimeMs.saturatingAdd(5_000L)
             out.add(
                 LyricEntry(
                     text = entry.text,
                     startTimeMs = entry.startTimeMs,
-                    endTimeMs = nextTimestampMs ?: (entry.startTimeMs + 5_000L),
-                    words = null
+                    endTimeMs = endTimeMs.coerceAtLeast(entry.startTimeMs),
+                    words = words
                 )
             )
         }
         nextTimestampMs = entry.startTimeMs
     }
     out.reverse()
-    return out
+    return foldAdjacentSquareBracketTranslations(out)
 }
 
 @Composable

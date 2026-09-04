@@ -78,6 +78,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.activity.MainActivity
 import moe.ouom.neriplayer.activity.shouldProcessUsbDeviceAttachedAction
@@ -92,14 +93,17 @@ import moe.ouom.neriplayer.core.player.lifecycle.scheduleUsbExclusivePlaybackRes
 import moe.ouom.neriplayer.core.player.lifecycle.stopPlaybackAfterUsbExclusiveNativeFailure
 import moe.ouom.neriplayer.core.player.metadata.resolveExternalBluetoothMetadataText
 import moe.ouom.neriplayer.core.player.metadata.shouldUseExternalBluetoothLyrics
+import moe.ouom.neriplayer.core.player.persistence.persistStateNow
 import moe.ouom.neriplayer.core.player.persistence.preloadRestoredStateSnapshot
 import moe.ouom.neriplayer.core.player.persistence.scheduleStatePersist
+import moe.ouom.neriplayer.core.player.playback.suppressPlaybackForAudioRouteLoss
 import moe.ouom.neriplayer.core.player.policy.usb.shouldRunUsbExclusiveBackgroundAudioAnchor
 import moe.ouom.neriplayer.core.player.policy.usb.UsbExclusiveKeepAliveProgress
 import moe.ouom.neriplayer.core.player.policy.usb.evaluateUsbExclusiveKeepAliveProgress
 import moe.ouom.neriplayer.core.player.timer.SleepTimerMode
 import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathState
 import moe.ouom.neriplayer.core.player.usb.path.UsbExclusiveAudioPathTracker
+import moe.ouom.neriplayer.core.player.usb.path.sameUsbExclusiveAudioPathConfiguration
 import moe.ouom.neriplayer.core.player.usb.session.UsbExclusiveSessionController
 import moe.ouom.neriplayer.core.player.usb.session.UsbExclusiveWakeLock
 import moe.ouom.neriplayer.core.player.usb.system.UsbExclusiveBackgroundAudioAnchor
@@ -119,6 +123,7 @@ import moe.ouom.neriplayer.data.settings.PlaybackServiceIdleShutdownPreference
 import moe.ouom.neriplayer.data.settings.readPlaybackPreferenceSnapshot
 import moe.ouom.neriplayer.data.traffic.isOfflineModeNow
 import moe.ouom.neriplayer.listentogether.mapping.toSongItem
+import moe.ouom.neriplayer.listentogether.playback.currentTrack
 import moe.ouom.neriplayer.listentogether.playback.expectedPositionMs
 import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherRoomState
 import moe.ouom.neriplayer.util.media.IsLandHelp
@@ -167,12 +172,13 @@ private data class UsbExclusiveNativeServiceSignal(
     val lastError: String?
 )
 
-private data class PlaybackNotificationSnapshot(
+internal data class PlaybackNotificationSnapshot(
     val songKey: String?,
     val title: String,
     val text: String,
     val isTransportActive: Boolean,
     val isPlaybackControlPlaying: Boolean,
+    val isAudioRouteMuted: Boolean,
     val isFavorite: Boolean,
     val requiresInteractiveFavoriteConfirmation: Boolean,
     val largeIconReady: Boolean,
@@ -213,6 +219,7 @@ private const val USB_EXCLUSIVE_BACKGROUND_KEEPALIVE_INTERVAL_MS = 1_000L
 private const val USB_EXCLUSIVE_KEEPALIVE_STALL_WARN_MS = 25_000L
 private const val USB_EXCLUSIVE_KEEPALIVE_STALL_RECOVERY_TICKS = 1
 private const val USB_EXCLUSIVE_KEEPALIVE_LOG_INTERVAL_TICKS = 3L
+private const val TASK_REMOVED_STATE_PERSIST_TIMEOUT_MS = 3_000L
 
 internal fun isLocalPlaybackCommandSyncSource(
     source: String,
@@ -228,6 +235,92 @@ internal fun shouldStopServiceForExternalPauseCommand(
 ): Boolean {
     // 系统外部控制面板的 stop 经常只是"结束本次会话", 不能把当前队列一并释放掉
     return stopServiceRequested && source != MEDIA_SESSION_STOP_SOURCE
+}
+
+internal fun shouldStopPlaybackOnTaskRemoved(
+    hasPlaybackSurfaceContent: Boolean,
+    transportActive: Boolean,
+): Boolean {
+    return hasPlaybackSurfaceContent && transportActive
+}
+
+internal fun resolveTaskRemovedTransportActive(
+    playerTransportActive: Boolean,
+    listenTogetherRemotePlaying: Boolean,
+): Boolean {
+    return playerTransportActive || listenTogetherRemotePlaying
+}
+
+internal data class TaskRemovedPlaybackAction(
+    val stopPlaybackImmediately: Boolean,
+    val persistPlaybackState: Boolean,
+    val stopServiceAfterPersist: Boolean,
+    val updateNotificationAfterPersist: Boolean,
+)
+
+internal data class TaskRemovedPlaybackCallbacks(
+    val stopPlaybackImmediately: () -> Unit,
+    val persistPlaybackState: suspend (String) -> Boolean,
+    val stopForegroundIfStarted: (String) -> Unit,
+    val stopSelf: () -> Unit,
+    val updateNotification: () -> Unit,
+    val onPlaybackStopFailure: (Throwable) -> Unit,
+    val onNotificationUpdateFailure: (Throwable) -> Unit,
+)
+
+internal fun resolveTaskRemovedPlaybackAction(
+    hasPlaybackSurfaceContent: Boolean,
+    playerTransportActive: Boolean,
+    listenTogetherRemotePlaying: Boolean,
+    hasItems: Boolean,
+): TaskRemovedPlaybackAction {
+    val transportActive = resolveTaskRemovedTransportActive(
+        playerTransportActive = playerTransportActive,
+        listenTogetherRemotePlaying = listenTogetherRemotePlaying,
+    )
+    val stopPlaybackImmediately = shouldStopPlaybackOnTaskRemoved(
+        hasPlaybackSurfaceContent = hasPlaybackSurfaceContent,
+        transportActive = transportActive,
+    )
+    return TaskRemovedPlaybackAction(
+        stopPlaybackImmediately = stopPlaybackImmediately,
+        persistPlaybackState = stopPlaybackImmediately || hasItems,
+        stopServiceAfterPersist = stopPlaybackImmediately,
+        updateNotificationAfterPersist = hasItems && !stopPlaybackImmediately,
+    )
+}
+
+internal suspend fun executeTaskRemovedPlaybackAction(
+    action: TaskRemovedPlaybackAction,
+    callbacks: TaskRemovedPlaybackCallbacks,
+) {
+    if (action.stopPlaybackImmediately) {
+        runCatching { callbacks.stopPlaybackImmediately() }
+            .onFailure(callbacks.onPlaybackStopFailure)
+    }
+    val playbackStatePersisted = if (action.persistPlaybackState) {
+        val reason = if (action.stopPlaybackImmediately) {
+            "task_removed"
+        } else {
+            "inactive_task_removed"
+        }
+        callbacks.persistPlaybackState(reason)
+    } else {
+        true
+    }
+    if (action.updateNotificationAfterPersist) {
+        runCatching { callbacks.updateNotification() }
+            .onFailure(callbacks.onNotificationUpdateFailure)
+    }
+    if (action.stopServiceAfterPersist) {
+        if (playbackStatePersisted) {
+            callbacks.stopForegroundIfStarted("task_removed")
+            callbacks.stopSelf()
+        } else {
+            runCatching { callbacks.updateNotification() }
+                .onFailure(callbacks.onNotificationUpdateFailure)
+        }
+    }
 }
 
 internal fun mediaSessionPlaybackActions(): Long {
@@ -264,6 +357,7 @@ internal fun isSupportedPlaybackWidgetAction(action: String): Boolean {
     return when (action) {
         AudioPlayerService.ACTION_PLAY,
         AudioPlayerService.ACTION_PAUSE,
+        AudioPlayerService.ACTION_RESTORE_VOLUME,
         AudioPlayerService.ACTION_TOGGLE_PLAY_PAUSE,
         AudioPlayerService.ACTION_NEXT,
         AudioPlayerService.ACTION_PREV,
@@ -448,6 +542,7 @@ class AudioPlayerService : Service() {
     companion object {
         const val ACTION_PLAY = "moe.ouom.neriplayer.action.PLAY"
         const val ACTION_PAUSE = "moe.ouom.neriplayer.action.PAUSE"
+        const val ACTION_RESTORE_VOLUME = "moe.ouom.neriplayer.action.RESTORE_VOLUME"
         const val ACTION_TOGGLE_PLAY_PAUSE =
             "moe.ouom.neriplayer.action.TOGGLE_PLAY_PAUSE"
         const val ACTION_STOP = "moe.ouom.neriplayer.action.STOP"
@@ -1014,7 +1109,11 @@ class AudioPlayerService : Service() {
         override fun onPlay() {
             runWhenPlayerRuntimeReady("media_session_play") {
                 keepPlayerRuntimeAfterServiceStop = false
-                PlayerManager.play()
+                if (PlayerManager.audioRouteMuteSuppressedFlow.value) {
+                    PlayerManager.restoreAudioRouteMute()
+                } else {
+                    PlayerManager.play()
+                }
                 updateAll()
                 refreshIdleShutdown("media_session_play")
             }
@@ -1399,6 +1498,11 @@ class AudioPlayerService : Service() {
             }
         }
         serviceScope.launch {
+            PlayerManager.audioRouteMuteSuppressedFlow.collectSafely("audioRouteMuteSuppressedFlow") {
+                updateNotification()
+            }
+        }
+        serviceScope.launch {
             PlayerManager.playWhenReadyFlow.collectSafely("playWhenReadyFlow") {
                 updatePlaybackState()
                 updateNotification()
@@ -1434,11 +1538,13 @@ class AudioPlayerService : Service() {
                 }
         }
         serviceScope.launch {
-            UsbExclusiveAudioPathTracker.state.collectSafely("usbExclusiveAudioPathState") { pathState ->
-                updateMediaSessionVolumeRouting(pathState)
-                updateUsbExclusiveServiceKeepAlive("usb_path_state")
-                refreshIdleShutdown("usb_path_state")
-            }
+            UsbExclusiveAudioPathTracker.state
+                .distinctUntilChanged(::sameUsbExclusiveAudioPathConfiguration)
+                .collectSafely("usbExclusiveAudioPathState") { pathState ->
+                    updateMediaSessionVolumeRouting(pathState)
+                    updateUsbExclusiveServiceKeepAlive("usb_path_state")
+                    refreshIdleShutdown("usb_path_state")
+                }
         }
         serviceScope.launch {
             PlayerManager.playbackPositionFlow
@@ -1515,6 +1621,11 @@ class AudioPlayerService : Service() {
                             "active USB audio device detached id=${detachedDevice?.deviceId} " +
                                 "name=${detachedDevice?.deviceName}"
                         )
+                        if (PlayerManager.shouldMuteListenTogetherListenerForAudioRouteLoss()) {
+                            PlayerManager.suppressPlaybackForAudioRouteLoss(
+                                reason = "listen_together_usb_output_disconnect"
+                            )
+                        }
                         StartupAudioFocusController.forceRelease("usb_device_detached")
                         PlayerManager.stopPlaybackAfterUsbExclusiveNativeFailure(
                             "usb_device_detached"
@@ -1661,6 +1772,10 @@ class AudioPlayerService : Service() {
         dispatchMediaButtonIntent(intent)
 
         when (action) {
+            ACTION_RESTORE_VOLUME -> {
+                PlayerManager.restoreAudioRouteMute()
+                updateAll()
+            }
             ACTION_PLAY -> {
                 val songList = IntentCompat.getParcelableArrayListExtra(
                     intent,
@@ -1671,7 +1786,11 @@ class AudioPlayerService : Service() {
                 if (!songList.isNullOrEmpty()) {
                     PlayerManager.playPlaylist(songList, startIndex)
                 } else if (PlayerManager.hasItems()) {
-                    PlayerManager.play()
+                    if (PlayerManager.audioRouteMuteSuppressedFlow.value) {
+                        PlayerManager.restoreAudioRouteMute()
+                    } else {
+                        PlayerManager.play()
+                    }
                 }
                 updateAll()
             }
@@ -1797,6 +1916,7 @@ class AudioPlayerService : Service() {
 
     private fun buildNotification(): Notification {
         val isPlaybackControlPlaying = PlayerManager.playbackControlPlayingFlow.value
+        val isAudioRouteMuted = PlayerManager.audioRouteMuteSuppressedFlow.value
         val song = playbackSurfaceSong()
 
         val contentIntent = PendingIntent.getActivity(
@@ -1809,6 +1929,7 @@ class AudioPlayerService : Service() {
         val prevIntent  = servicePendingIntent(ACTION_PREV, 1)
         val playIntent  = servicePendingIntent(ACTION_PLAY, 2)
         val pauseIntent = servicePendingIntent(ACTION_PAUSE, 3)
+        val restoreVolumeIntent = servicePendingIntent(ACTION_RESTORE_VOLUME, 8)
         val nextIntent  = servicePendingIntent(ACTION_NEXT, 4)
         val toggleFavIntent = servicePendingIntent(ACTION_TOGGLE_FAV, 6)
         val toggleFloatingLyricsIntent = servicePendingIntent(ACTION_TOGGLE_FLOATING_LYRICS, 7)
@@ -1852,17 +1973,21 @@ class AudioPlayerService : Service() {
         )
         builder.addAction(
             mediaNotificationAction(
-                iconRes = if (isPlaybackControlPlaying) {
-                    R.drawable.round_pause_24
-                } else {
-                    R.drawable.round_play_arrow_24
+                iconRes = when {
+                    isAudioRouteMuted -> R.drawable.round_volume_up_24
+                    isPlaybackControlPlaying -> R.drawable.round_pause_24
+                    else -> R.drawable.round_play_arrow_24
                 },
-                title = if (isPlaybackControlPlaying) {
-                    getString(R.string.player_pause)
-                } else {
-                    getString(R.string.player_play)
+                title = when {
+                    isAudioRouteMuted -> getString(R.string.player_restore_volume)
+                    isPlaybackControlPlaying -> getString(R.string.player_pause)
+                    else -> getString(R.string.player_play)
                 },
-                pendingIntent = if (isPlaybackControlPlaying) pauseIntent else playIntent
+                pendingIntent = when {
+                    isAudioRouteMuted -> restoreVolumeIntent
+                    isPlaybackControlPlaying -> pauseIntent
+                    else -> playIntent
+                }
             )
         )
         builder.addAction(favAction)
@@ -1932,8 +2057,8 @@ class AudioPlayerService : Service() {
                 // 魅族状态栏歌词依赖这两个私有通知标记
                 flags = flags.or(FLAG_ALWAYS_SHOW_TICKER)
                 flags = flags.or(FLAG_ONLY_UPDATE_TICKER)
-                // ticker_icon: 状态栏歌词前的小图标
-                extras.putInt("ticker_icon", R.drawable.ic_notification_small)
+                // ticker_icon: 状态栏歌词前的小图标 (16x16dp)
+                extras.putInt("ticker_icon", R.drawable.ic_statusbar_lyric)
                 // false 表示沿用缓存图标, 图标资源变化时才需要切换
                 extras.putBoolean("ticker_icon_switch", false)
             }
@@ -2128,6 +2253,7 @@ class AudioPlayerService : Service() {
             text = text,
             isTransportActive = PlayerManager.isTransportActive(),
             isPlaybackControlPlaying = PlayerManager.playbackControlPlayingFlow.value,
+            isAudioRouteMuted = PlayerManager.audioRouteMuteSuppressedFlow.value,
             isFavorite = isFavoriteSong(song),
             requiresInteractiveFavoriteConfirmation = requiresInteractiveFavoriteConfirmation(song),
             largeIconReady = currentNotificationLargeIcon != null,
@@ -2574,26 +2700,95 @@ class AudioPlayerService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        val hasPlaybackSurfaceContent = hasPlaybackSurfaceContent()
+        val hasItems = PlayerManager.hasItems()
+        val playerTransportActive = runCatching {
+            PlayerManager.isTransportActiveWithoutInitialization()
+        }.getOrDefault(false)
+        val listenTogetherRemotePlaying = isListenTogetherRemotePlaying()
+        val transportActive = resolveTaskRemovedTransportActive(
+            playerTransportActive = playerTransportActive,
+            listenTogetherRemotePlaying = listenTogetherRemotePlaying,
+        )
+        val taskRemovedAction = resolveTaskRemovedPlaybackAction(
+            hasPlaybackSurfaceContent = hasPlaybackSurfaceContent,
+            playerTransportActive = playerTransportActive,
+            listenTogetherRemotePlaying = listenTogetherRemotePlaying,
+            hasItems = hasItems,
+        )
         NPLogger.w(
             "NERI-APS",
-            "onTaskRemoved hasItems=${PlayerManager.hasItems()} isPlaying=${PlayerManager.isPlayingFlow.value}"
+            "onTaskRemoved hasSurface=$hasPlaybackSurfaceContent " +
+                "transportActive=$transportActive playerTransport=$playerTransportActive " +
+                "listenTogetherRemotePlaying=$listenTogetherRemotePlaying hasItems=$hasItems " +
+                "isPlaying=${PlayerManager.isPlayingFlow.value}"
         )
-        // 划掉任务不代表用户停止播放, 正在播的会话要保留进程重建恢复意图
-        if (PlayerManager.hasItems()) {
+        if (taskRemovedAction.stopPlaybackImmediately) {
+            allowServiceRestart = false
             flushPlaybackStatsSafely("task_removed", "task removed")
-            runCatching {
-                PlayerManager.scheduleStatePersist(
-                    positionMs = PlayerManager.playbackPositionFlow.value,
-                    shouldResumePlayback = PlayerManager.playWhenReadyFlow.value ||
-                        PlayerManager.isPlayingFlow.value,
-                    debounceMs = 0L
+            serviceScope.launch {
+                executeTaskRemovedPlaybackAction(
+                    action = taskRemovedAction,
+                    callbacks = taskRemovedPlaybackCallbacks()
                 )
-            }.onFailure {
-                NPLogger.w("NERI-APS", "state persist failed during task removed", it)
             }
-            runCatching { updateNotification() }
-                .onFailure { NPLogger.w("NERI-APS", "notification update failed during task removed", it) }
+            return
         }
+        if (taskRemovedAction.persistPlaybackState) {
+            serviceScope.launch {
+                executeTaskRemovedPlaybackAction(
+                    action = taskRemovedAction,
+                    callbacks = taskRemovedPlaybackCallbacks()
+                )
+            }
+        }
+    }
+
+    private fun taskRemovedPlaybackCallbacks(): TaskRemovedPlaybackCallbacks {
+        return TaskRemovedPlaybackCallbacks(
+            stopPlaybackImmediately = {
+                PlayerManager.stopPlaybackImmediately(
+                    reason = "task_removed",
+                    forcePersist = false
+                )
+            },
+            persistPlaybackState = { reason ->
+                persistTaskRemovedPlaybackState(reason)
+            },
+            stopForegroundIfStarted = { reason ->
+                stopForegroundIfStarted(reason)
+            },
+            stopSelf = {
+                stopSelf()
+            },
+            updateNotification = {
+                updateNotification()
+            },
+            onPlaybackStopFailure = { error ->
+                NPLogger.w("NERI-APS", "playback stop failed during task removed", error)
+            },
+            onNotificationUpdateFailure = { error ->
+                NPLogger.w(
+                    "NERI-APS",
+                    "notification update failed during inactive task removed",
+                    error
+                )
+            },
+        )
+    }
+
+    private suspend fun persistTaskRemovedPlaybackState(reason: String): Boolean {
+        return runCatching {
+            withTimeout(TASK_REMOVED_STATE_PERSIST_TIMEOUT_MS) {
+                PlayerManager.persistStateNow(
+                    positionMs = PlayerManager.playbackPositionFlow.value,
+                    shouldResumePlayback = false,
+                    reason = reason
+                )
+            }
+        }.onFailure { error ->
+            NPLogger.w("NERI-APS", "state persist failed during $reason", error)
+        }.getOrDefault(false)
     }
 
     private fun flushPlaybackStatsSafely(reason: String, context: String) {
@@ -2874,7 +3069,7 @@ class AudioPlayerService : Service() {
 
     private fun listenTogetherRoomSong(): SongItem? {
         val room = AppContainer.listenTogetherSessionManager.roomState.value ?: return null
-        val track = room.track ?: room.queue.getOrNull(room.currentIndex)
+        val track = room.currentTrack()
         return track?.toSongItem()
     }
 
@@ -2926,7 +3121,7 @@ internal fun resolveListenTogetherMediaSessionPosition(
     roomState: ListenTogetherRoomState,
     nowMs: Long = System.currentTimeMillis()
 ): Long {
-    val activeTrack = roomState.track ?: roomState.queue.getOrNull(roomState.currentIndex)
+    val activeTrack = roomState.currentTrack()
     return roomState.playback.expectedPositionMs(
         nowMs = nowMs,
         durationMs = activeTrack?.durationMs ?: 0L
