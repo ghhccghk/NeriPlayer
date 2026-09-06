@@ -420,7 +420,7 @@ object AppContainer {
             youtubeMusicClient = youtubeMusicClient
         )
     }
-    val kugouSearchApi by lazy { moe.ouom.neriplayer.core.api.search.KuGouSearchApi(kugouClient) }
+    val kugouSearchApi by lazy { moe.ouom.neriplayer.core.api.search.KuGouSearchApi(kugouClient, kugouLyricsClient) }
     val listenTogetherApi by lazy { ListenTogetherApi(sharedOkHttpClient) }
     private val listenTogetherOkHttpClient by lazy {
         sharedOkHttpClient.newBuilder()

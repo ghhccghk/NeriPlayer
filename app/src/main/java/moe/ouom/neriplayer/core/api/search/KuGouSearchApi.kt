@@ -32,11 +32,15 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import moe.ouom.neriplayer.core.api.kugou.KugouClientWrapper
+import moe.ouom.neriplayer.core.api.lyrics.KugouLyricsClient
 import moe.ouom.neriplayer.core.api.lyrics.kugouYrc
 import moe.ouom.neriplayer.core.player.PlayerManager
 import java.io.IOException
 
-class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
+class KuGouSearchApi(
+    private val client: KugouClientWrapper,
+    private val lyricsClient: KugouLyricsClient? = null
+) : SearchApi {
 
     override suspend fun search(keyword: String, page: Int): List<SongSearchInfo> {
         return searchPage(keyword = keyword, page = page).items
@@ -96,14 +100,13 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
         return withContext(Dispatchers.IO) {
             coroutineScope {
                 val infoDeferred = async { client.getPrivilegeLite(id) }
-                val lyricDeferred = async { searchAndFetchLyric(id) }
+                val lyricFallbackDeferred = async { searchAndFetchLyric(id) }
 
                 val infoResponse = infoDeferred.await()
                 if (infoResponse.status != 200) throw IOException("Failed to fetch song info for $id")
 
                 val data = infoResponse.body["data"]?.jsonArray?.get(0)?.jsonObject
                     ?: throw IOException("Empty response for $id")
-
 
                 val songName = data["name"]?.jsonPrimitive?.content ?: "Unknown"
                 val singer = data["singername"]?.jsonPrimitive?.content ?: "Unknown"
@@ -112,7 +115,13 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                 val album = data["albumname"]?.jsonPrimitive?.content ?: ""
                 val coverUrl = info?.get("image")?.jsonPrimitive?.content?.replace("/{size}/", "/")
 
-                val lyric = lyricDeferred.await()
+                // 优先走 KugouLyricsClient 的完整解析管道（KRC 字词时轴 + 翻译），SDK 侧仅作回退
+                val payloadDeferred = async { lyricsClient?.getLyricsByHash(hash = id, title = songName, artist = singer) }
+                val payload = payloadDeferred.await()
+                val fallbackLyric = lyricFallbackDeferred.await()
+
+                val lyricText = payload?.lyrics
+                    ?: fallbackLyric?.let { kugouYrc(it) }
 
                 SongDetails(
                     id = id,
@@ -120,8 +129,9 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                     singer = singer,
                     album = "${PlayerManager.KuGou_SOURCE_TAG}$album",
                     coverUrl = coverUrl,
-                    lyric = if (lyric != null) kugouYrc(lyric) else null,
-                    translatedLyric = null
+                    lyric = lyricText
+                        ?.takeIf { it.isNotBlank() },
+                    translatedLyric = payload?.translatedLyrics
                 )
             }
         }

@@ -59,6 +59,61 @@ class KugouLyricsClient(private val okHttpClient: OkHttpClient) {
 
     suspend fun getBestLyrics(song: KugouSongSearchResult): String? = getBestLyricPayload(song)?.lyrics
 
+    /**
+     * 按 hash 直接获取解析后的歌词（优先 KRC 字词时轴，回退 LRC）。
+     * 供无法获得完整歌曲信息（仅 hash）的场景使用，例如搜索结果详情。
+     */
+    suspend fun getLyricsByHash(
+        hash: String,
+        title: String? = null,
+        artist: String? = null
+    ): KugouLyricsPayload? = withContext(Dispatchers.IO) {
+        try {
+            val candidates = searchLyricCandidatesByHash(hash = hash, title = title, artist = artist)
+                .sortedWith(
+                    compareByDescending<KugouLyricCandidate> { it.score }
+                )
+            for (candidate in candidates) {
+                downloadKrcLyric(candidate)?.let { payload ->
+                    return@withContext payload
+                }
+            }
+            for (candidate in candidates) {
+                downloadLrcLyric(candidate)?.let { payload ->
+                    return@withContext payload
+                }
+            }
+            null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            NPLogger.d(TAG, "Kugou hash lyric lookup failed: ${error.message}")
+            null
+        }
+    }
+
+    private suspend fun searchLyricCandidatesByHash(
+        hash: String,
+        title: String?,
+        artist: String?
+    ): List<KugouLyricCandidate> {
+        val keyword = buildString {
+            if (!artist.isNullOrBlank()) append(artist)
+            if (!artist.isNullOrBlank() && !title.isNullOrBlank()) append(" - ")
+            if (!title.isNullOrBlank()) append(title)
+        }
+        val url = "https://lyrics.kugou.com/search".toHttpUrl().newBuilder()
+            .addQueryParameter("ver", "1")
+            .addQueryParameter("man", "yes")
+            .addQueryParameter("client", "pc")
+            .addQueryParameter("keyword", keyword)
+            .addQueryParameter("duration", "0")
+            .addQueryParameter("hash", hash)
+            .build()
+        val body = executeString(url.toString()) ?: return emptyList()
+        return parseKugouLyricCandidates(body)
+    }
+
     suspend fun getBestLyricPayload(song: KugouSongSearchResult): KugouLyricsPayload? = withContext(Dispatchers.IO) {
         try {
             val candidates = searchLyricCandidates(song)
