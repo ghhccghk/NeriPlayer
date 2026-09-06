@@ -122,6 +122,7 @@ import kotlinx.coroutines.launch
 import moe.ouom.neriplayer.R
 import moe.ouom.neriplayer.core.di.AppContainer
 import moe.ouom.neriplayer.core.download.GlobalDownloadManager
+import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.core.player.download.AudioDownloadManager
 import moe.ouom.neriplayer.data.local.playlist.LocalPlaylistRepository
@@ -157,6 +158,7 @@ import moe.ouom.neriplayer.util.search.playlistSearchValues
 @Composable
 fun KugouPlaylistDetailScreen(
     playlist: PlaylistSummary,
+    playlistType: String = "rank",
     onBack: () -> Unit = {},
     onSongClick: (List<SongItem>, Int) -> Unit = { _, _ -> },
     offlineMode: Boolean = false
@@ -261,7 +263,8 @@ fun KugouPlaylistDetailScreen(
     }
 
     LaunchedEffect(playlist.id) {
-        viewModel.start(playlist)
+        NPLogger.d("KugouPlaylistDetailScreen", "LaunchedEffect: playlist.id=${playlist.id}, playlistType=$playlistType")
+        viewModel.start(playlist, playlistType)
     }
 
     var latestPlaylist = remember { playlist }
@@ -935,3 +938,4 @@ private fun SongRow(
         }
     }
 }
+

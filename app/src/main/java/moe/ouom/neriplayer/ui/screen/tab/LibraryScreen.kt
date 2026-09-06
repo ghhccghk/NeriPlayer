@@ -61,6 +61,7 @@ import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.History
 import moe.ouom.neriplayer.ui.component.overlay.DensityScaledAlertDialog as AlertDialog
 import androidx.compose.material3.Card
@@ -174,6 +175,7 @@ enum class LibraryTab(val labelResId: Int) {
     NETEASE(R.string.library_tab_netease),
     NETEASEALBUM(R.string.library_tab_netease_album),
     BILI(R.string.library_tab_bilibili),
+    KUGOU(R.string.library_tab_kugou),
     QQMUSIC(R.string.library_tab_qqmusic)
 }
 
@@ -263,6 +265,7 @@ internal fun libraryTabDisplayOrder(
             LibraryTab.YTMUSIC,
             LibraryTab.NETEASE,
             LibraryTab.BILI,
+            LibraryTab.KUGOU,
             LibraryTab.QQMUSIC
         )
     } else {
@@ -272,6 +275,7 @@ internal fun libraryTabDisplayOrder(
             LibraryTab.NETEASE,
             LibraryTab.YTMUSIC,
             LibraryTab.BILI,
+            LibraryTab.KUGOU,
             LibraryTab.QQMUSIC
         )
     }
@@ -285,6 +289,7 @@ private fun LibraryTab.asVisibleLibraryTab(): LibraryTab {
 private fun LibraryTab?.isRefreshable(): Boolean {
     return when (this?.asVisibleLibraryTab()) {
         LibraryTab.BILI,
+        LibraryTab.KUGOU,
         LibraryTab.YTMUSIC,
         LibraryTab.NETEASE -> true
         else -> false
@@ -302,6 +307,7 @@ fun LibraryScreen(
     neteaseListState: LazyListState,
     youtubeMusicListState: LazyListState,
     biliListState: LazyListState,
+    kugouListState: LazyListState,
     qqMusicListState: LazyListState,
     topAppBarState: TopAppBarState,
     onLocalPlaylistClick: (LocalPlaylist) -> Unit = {},
@@ -312,6 +318,7 @@ fun LibraryScreen(
     onNeteaseArtistClick: (NeteaseArtistSummary) -> Unit = {},
     onYouTubeMusicPlaylistClick: (YouTubeMusicPlaylist) -> Unit = {},
     onBiliPlaylistClick: (BiliPlaylist) -> Unit = {},
+    onKugouPlaylistClick: (PlaylistSummary) -> Unit = {},
     onOpenRecent: () -> Unit = {},
     onOpenStats: () -> Unit = {},
     offlineMode: Boolean = false
@@ -378,6 +385,11 @@ fun LibraryScreen(
                 LibraryTab.BILI -> shouldAllowCollapsingTopAppBar(
                     biliListState.canScrollForward,
                     biliListState.canScrollBackward,
+                    topAppBarState.collapsedFraction
+                )
+                LibraryTab.KUGOU -> shouldAllowCollapsingTopAppBar(
+                    kugouListState.canScrollForward,
+                    kugouListState.canScrollBackward,
                     topAppBarState.collapsedFraction
                 )
                 LibraryTab.QQMUSIC -> shouldAllowCollapsingTopAppBar(
@@ -467,6 +479,7 @@ fun LibraryScreen(
                     onRefresh = {
                         when (currentTab) {
                             LibraryTab.BILI -> vm.refreshBilibili()
+                              LibraryTab.KUGOU -> vm.refreshKugouPlaylists()
                             LibraryTab.YTMUSIC -> vm.refreshYouTubeMusicPlaylists()
                             LibraryTab.NETEASE -> {
                                 vm.refreshNeteasePlaylists()
@@ -548,6 +561,14 @@ fun LibraryScreen(
                             error = ui.biliError,
                             listState = biliListState,
                             onClick = onBiliPlaylistClick,
+                            offlineMode = offlineMode
+                        )
+
+                        LibraryTab.KUGOU -> KugouPlaylistList(
+                            playlists = ui.kugouPlaylists,
+                            error = ui.kugouError,
+                            listState = kugouListState,
+                            onClick = onKugouPlaylistClick,
                             offlineMode = offlineMode
                         )
 
@@ -3495,3 +3516,123 @@ private fun QqMusicPlaylistList(
         }
     }
 }
+
+@Composable
+private fun KugouPlaylistList(
+    playlists: List<PlaylistSummary>,
+    error: String?,
+    listState: LazyListState,
+    onClick: (PlaylistSummary) -> Unit,
+    offlineMode: Boolean
+) {
+    val miniPlayerHeight = LocalMiniPlayerHeight.current
+
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp + miniPlayerHeight),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        val cardShape = RoundedCornerShape(12.dp)
+        if (error != null) {
+            item {
+                Card(
+                    shape = cardShape,
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .clip(cardShape)
+                ) {
+                    ListItem(
+                        headlineContent = { Text(error) },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Outlined.ErrorOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(56.dp)
+                            )
+                        }
+                    )
+                }
+            }
+        } else if (playlists.isEmpty()) {
+            item {
+                Card(
+                    shape = cardShape,
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .clip(cardShape)
+                ) {
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.library_kugou_playlist_empty)) },
+                        supportingContent = {
+                            Text(
+                                stringResource(R.string.library_kugou_login_hint),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(56.dp)
+                            )
+                        }
+                    )
+                }
+            }
+        } else {
+            items(items = playlists, key = { it.id }) { playlist ->
+                Card(
+                    shape = cardShape,
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .clip(cardShape)
+                        .clickable { onClick(playlist) }
+                ) {
+                    ListItem(
+                        headlineContent = {
+                            Text(
+                                text = playlist.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        supportingContent = {
+                            Text(
+                                text = pluralStringResource(
+                                    R.plurals.library_song_count,
+                                    playlist.trackCount,
+                                      playlist.trackCount
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        leadingContent = {
+                            AsyncImage(
+                                model = playlist.picUrl,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+

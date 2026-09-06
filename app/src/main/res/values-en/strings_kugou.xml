@@ -22,6 +22,7 @@
     <string name="debug_kugou_probe_action_lyric_search">Search Lyrics (Copy JSON)</string>
     <string name="debug_kugou_probe_action_rank_list">Chart List (Copy JSON)</string>
     <string name="debug_kugou_probe_action_rank_audio">Chart Songs (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_user_playlists">User Playlists (Copy JSON)</string>
     <string name="debug_kugou_probe_keyword_required">Please fill in the search keyword first</string>
     <string name="debug_kugou_probe_hash_required">Please fill in the song hash first</string>
     <string name="debug_kugou_probe_rank_required">Please fill in the chart ID first</string>

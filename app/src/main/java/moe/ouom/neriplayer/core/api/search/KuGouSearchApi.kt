@@ -34,6 +34,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import moe.ouom.neriplayer.core.api.kugou.KugouClientWrapper
 import moe.ouom.neriplayer.core.api.lyrics.KugouLyricsClient
 import moe.ouom.neriplayer.core.api.lyrics.kugouYrc
+import moe.ouom.neriplayer.core.logging.NPLogger
 import moe.ouom.neriplayer.core.player.PlayerManager
 import java.io.IOException
 
@@ -137,9 +138,14 @@ class KuGouSearchApi(
         }
     }
 
-    suspend fun searchAndFetchLyric(hash: String): String? {
-        val searchResponse = client.searchLyric(hash = hash)
-        if (searchResponse.status != 200) return null
+    suspend fun searchAndFetchLyric(hash: String, albumAudioId: Long = 0L): String? {
+        NPLogger.d("KuGouSearchApi", "searchAndFetchLyric: hash=$hash, albumAudioId=$albumAudioId")
+        val searchResponse = client.searchLyric(hash = hash, albumAudioId = albumAudioId)
+        NPLogger.d("KuGouSearchApi", "searchAndFetchLyric: searchResponse.status=${searchResponse.status}")
+        if (searchResponse.status != 200) {
+            NPLogger.w("KuGouSearchApi", "searchAndFetchLyric: search failed, body=${searchResponse.body}")
+            return null
+        }
 
         val candidates = searchResponse.body["candidates"]?.jsonArray
             ?: searchResponse.body["info"]?.jsonArray

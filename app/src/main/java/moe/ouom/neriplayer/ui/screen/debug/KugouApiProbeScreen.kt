@@ -208,6 +208,12 @@ fun KugouApiProbeScreen() {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.debug_kugou_probe_action_rank_audio)) }
 
+                  OutlinedButton(
+                      onClick = { vm.getUserPlaylistsAndCopy() },
+                      enabled = !ui.running,
+                      modifier = Modifier.fillMaxWidth()
+                  ) { Text(stringResource(R.string.debug_kugou_probe_action_user_playlists)) }
+
                 if (ui.running) {
                     Spacer(Modifier.height(8.dp))
                     CircularProgressIndicator()
@@ -251,3 +257,4 @@ fun KugouApiProbeScreen() {
         Spacer(Modifier.height(24.dp))
     }
 }
+

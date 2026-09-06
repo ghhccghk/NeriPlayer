@@ -49,6 +49,16 @@ import moe.ouom.neriplayer.data.local.playlist.LocalPlaylistDeleteResult
 import moe.ouom.neriplayer.data.local.playlist.runLocalPlaylistMutationSafely
 import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.core.logging.NPLogger
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import moe.ouom.neriplayer.core.di.AppContainer.neteaseClient
+import moe.ouom.neriplayer.ui.viewmodel.playlist.IdData
+import moe.ouom.neriplayer.ui.viewmodel.playlist.IdData.getGlobalId
 import org.json.JSONObject
 import java.io.IOException
 
@@ -64,7 +74,9 @@ data class LibraryUiState(
     val youtubeMusicPlaylists: List<YouTubeMusicPlaylist> = emptyList(),
     val youtubeMusicError: String? = null,
     val biliPlaylists: List<BiliPlaylist> = emptyList(),
-    val biliError: String? = null
+    val biliError: String? = null,
+    val kugouPlaylists: List<PlaylistSummary> = emptyList(),
+    val kugouError: String? = null
 )
 
 @Suppress("unused")
@@ -77,6 +89,9 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     private val biliCookieRepo = AppContainer.biliCookieRepo
     private val biliClient = AppContainer.biliClient
     private val youtubeAuthRepo = AppContainer.youtubeAuthRepo
+
+    private val kugouCookieRepo = AppContainer.kugouCookieRepo
+    private val kugouClient = AppContainer.kugouClient
 
 
     private val _uiState = MutableStateFlow(
@@ -160,6 +175,25 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
+        // 酷狗 歌单
+        viewModelScope.launch {
+            kugouCookieRepo.cookieFlow.collect { cookies ->
+                // Check cookies directly instead of isLoggedIn() to avoid race condition
+                val hasLogin = !cookies["token"].isNullOrBlank() && 
+                    (cookies["userid"]?.toLongOrNull() ?: 0L) > 0L
+                NPLogger.d("LibraryViewModel-Kugou", "cookieFlow emitted, hasLogin=$hasLogin, cookieKeys=${cookies.keys}")
+                if (hasLogin) {
+                    // Seed the SDK cookie jar before making API calls
+                    kugouClient.seedFromRepository()
+                    refreshKugouPlaylists()
+                } else {
+                    _uiState.value = _uiState.value.copy(
+                        kugouPlaylists = emptyList(),
+                        kugouError = null
+                    )
+                }
+            }
+        }
         // Bilibili
         viewModelScope.launch {
             biliCookieRepo.cookieFlow.collect { cookies ->
@@ -300,7 +334,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
-    
+
     fun refreshNeteaseAlbums() {
         viewModelScope.launch {
             try {
@@ -364,6 +398,106 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+
+    fun refreshKugouPlaylists() {
+        viewModelScope.launch {
+            try {
+                NPLogger.d("LibraryViewModel-Kugou", "refreshKugouPlaylists start")
+                val response = withContext(Dispatchers.IO) {
+                    kugouClient.user.getUserPlaylist(pageSize = 100, page = 1)
+                }
+                NPLogger.d("LibraryViewModel-Kugou", "refreshKugouPlaylists response status=${response.status}, bodyKeys=${response.body.keys}")
+                NPLogger.d("LibraryViewModel-Kugou", "refreshKugouPlaylists response body=${response.body}")
+                val mapped = parseKugouUserPlaylists(response)
+                NPLogger.d("LibraryViewModel-Kugou", "refreshKugouPlaylists parsed count=${mapped.size}")
+                _uiState.value = _uiState.value.copy(
+                    kugouPlaylists = mapped,
+                    kugouError = null
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                NPLogger.e("LibraryViewModel-Kugou", "refreshKugouPlaylists failed", e)
+                _uiState.value = _uiState.value.copy(kugouError = e.message)
+            }
+        }
+    }
+    private fun parseKugouUserPlaylists(response: top.ghhccghk.multiplatform.kugouapi.core.KuGouResponse): List<PlaylistSummary> {
+        val result = mutableListOf<PlaylistSummary>()
+        try {
+            val status = response.status
+            NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: httpStatus=$status")
+            
+            if (status != 200) {
+                NPLogger.w("LibraryViewModel-Kugou", "parseKugouUserPlaylists: non-200 status=$status")
+                return emptyList()
+            }
+            
+            // The body might be a JsonObject or a JsonPrimitive (string)
+            val bodyElement = response.body
+            val bodyObj = if (bodyElement is kotlinx.serialization.json.JsonObject) {
+                bodyElement
+            } else {
+                // body is a string, parse it
+                val bodyStr = bodyElement.toString().removeSurrounding("\"")
+                try {
+                    kotlinx.serialization.json.Json.parseToJsonElement(bodyStr) as kotlinx.serialization.json.JsonObject
+                } catch (e: Exception) {
+                    NPLogger.e("LibraryViewModel-Kugou", "parseKugouUserPlaylists: failed to parse body string", e)
+                    return emptyList()
+                }
+            }
+            
+            NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: bodyKeys=${bodyObj.keys}")
+            
+            val data = bodyObj["data"]?.jsonObject
+            if (data == null) {
+                NPLogger.w("LibraryViewModel-Kugou", "parseKugouUserPlaylists: no data field")
+                return emptyList()
+            }
+            
+            // The playlist array is in data.info (not data.list)
+            val list = data["info"]?.jsonArray
+            if (list == null) {
+                NPLogger.w("LibraryViewModel-Kugou", "parseKugouUserPlaylists: no info array, dataKeys=${data.keys}")
+                return emptyList()
+            }
+            
+            NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: info array size=${list.size}")
+            
+            for (i in list.indices) {
+                val obj = list[i].jsonObject
+                if (i == 0) {
+                    NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: first item keys=${obj.keys}")
+                }
+                
+                val globalId = obj["global_collection_id"]?.jsonPrimitive?.contentOrNull
+                val listId = obj["listid"]?.jsonPrimitive?.longOrNull ?: continue
+                // Store global_collection_id for later use
+                if (globalId != null) {
+                    IdData.storeGlobalId(listId, globalId)
+                }
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["listname"]?.jsonPrimitive?.contentOrNull
+                    ?: continue
+                val cover = obj["pic"]?.jsonPrimitive?.contentOrNull
+                    ?.replace("{size}", "")
+                    ?: ""
+                val count = obj["count"]?.jsonPrimitive?.intOrNull
+                    ?: obj["m_count"]?.jsonPrimitive?.intOrNull
+                    ?: 0
+                
+                if (listId != 0L && name.isNotBlank()) {
+                    NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: added id=$listId, name=$name, count=$count")
+                    result.add(PlaylistSummary(listId, name, cover, 0L, count))
+                }
+            }
+        } catch (e: Exception) {
+            NPLogger.e("LibraryViewModel-Kugou", "parseKugouUserPlaylists error", e)
+        }
+        NPLogger.d("LibraryViewModel-Kugou", "parseKugouUserPlaylists: total parsed=${result.size}")
+        return result
+    }
     fun createLocalPlaylist(name: String) {
         launchPlaylistMutation("createLocalPlaylist") { localRepo.createPlaylist(name) }
     }
@@ -430,7 +564,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
         return result
     }
-    
+
     private fun parseNeteaseAlbums(raw: String): List<AlbumSummary> {
         val result = mutableListOf<AlbumSummary>()
         val root = JSONObject(raw)
@@ -467,3 +601,9 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 }
+
+
+
+
+
+

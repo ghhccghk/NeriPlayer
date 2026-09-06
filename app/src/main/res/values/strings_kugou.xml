@@ -22,6 +22,7 @@
     <string name="debug_kugou_probe_action_lyric_search">搜索歌词（复制 JSON）</string>
     <string name="debug_kugou_probe_action_rank_list">排行榜列表（复制 JSON）</string>
     <string name="debug_kugou_probe_action_rank_audio">排行榜歌曲（复制 JSON）</string>
+    <string name="debug_kugou_probe_action_user_playlists">用户歌单列表（复制 JSON）</string>
     <string name="debug_kugou_probe_keyword_required">请先填写搜索关键词</string>
     <string name="debug_kugou_probe_hash_required">请先填写歌曲 Hash</string>
     <string name="debug_kugou_probe_rank_required">请先填写排行榜 ID</string>

@@ -1056,7 +1056,7 @@ internal object PlayerLyricsProvider {
     ): List<LyricEntry> {
         val hash = requireKugouHash(song) ?: return emptyList()
         return try {
-            val lrcText = kugouSearchApi.searchAndFetchLyric(hash)
+            val lrcText = kugouSearchApi.searchAndFetchLyric(hash, song.albumId)
             if (lrcText.isNullOrBlank()) {
                 NPLogger.d("NERI-PlayerManager", "Kugou lyrics not found for hash=$hash")
                 return emptyList()

@@ -2263,8 +2263,8 @@ private fun NeriAppContent(
         return "local_playlist_detail/$id"
     }
 
-    fun kugouPlaylistSourceRoute(playlist: PlaylistSummary): String {
-        return "kugou_playlist_detail/${Uri.encode(navigationGson.toJson(playlist))}"
+    fun kugouPlaylistSourceRoute(playlist: PlaylistSummary, type: String = "rank"): String {
+        return "kugou_playlist_detail/$type/${Uri.encode(navigationGson.toJson(playlist))}"
     }
 
     val activeCoverSeedHex = resolveActiveCoverSeedHex(
@@ -2837,7 +2837,8 @@ private fun NeriAppContent(
                         neteasePlaylistSourceRoute = ::neteasePlaylistSourceRoute,
                         neteaseAlbumSourceRoute = ::neteaseAlbumSourceRoute,
                         biliPlaylistSourceRoute = ::biliPlaylistSourceRoute,
-                        localPlaylistSourceRoute = ::localPlaylistSourceRoute,
+                          kugouPlaylistSourceRoute = ::kugouPlaylistSourceRoute,
+                          localPlaylistSourceRoute = ::localPlaylistSourceRoute,
                         onOpenRecent = {
                             navController.navigate(Destinations.Recent.route)
                         },
@@ -3757,46 +3758,49 @@ private fun NeriAppContent(
 
                                 composable(
                                     route = Destinations.KugouPlaylistDetail.route,
-                                    arguments = listOf(navArgument("playlistJson") {
-                                        type = NavType.StringType
-                                    }),
-                                    enterTransition = {
-                                        transparentDetailEnterTransition(coherentFeedbackEnabled)
-                                    },
-                                    exitTransition = {
-                                        transparentDetailExitTransition(coherentFeedbackEnabled)
-                                    },
-                                    popEnterTransition = {
-                                        transparentDetailPopEnterTransition(coherentFeedbackEnabled)
-                                    },
-                                    popExitTransition = {
-                                        transparentDetailPopExitTransition(coherentFeedbackEnabled)
-                                    }
-                                ) { backStackEntry ->
-                                    val playlistJson = backStackEntry.arguments
-                                        ?.getString("playlistJson")
-                                    val kugouPlaylist = navigationGson.fromJson(
-                                        playlistJson,
-                                        PlaylistSummary::class.java
-                                    )
-                                    RenderNavHostScene(
-                                        Destinations.KugouPlaylistDetail.route
-                                    ) {
-                                        KugouPlaylistDetailScreen(
-                                            playlist = kugouPlaylist,
-                                            onBack = { navController.popBackStack() },
-                                            onSongClick = { songs, index ->
-                                                playSongsAndOpenNowPlaying(
-                                                    songs = songs,
-                                                    index = index,
-                                                    sourceRoute = kugouPlaylistSourceRoute(kugouPlaylist)
-                                                )
-                                            },
-                                            offlineMode = offlineMode
-                                        )
-                                    }
-                                }
-
+                                      arguments = listOf(
+                                          navArgument("playlistJson") { type = NavType.StringType },
+                                          navArgument("type") { type = NavType.StringType; defaultValue = "rank" }
+                                      ),
+                                      enterTransition = {
+                                          transparentDetailEnterTransition(coherentFeedbackEnabled)
+                                      },
+                                      exitTransition = {
+                                          transparentDetailExitTransition(coherentFeedbackEnabled)
+                                      },
+                                      popEnterTransition = {
+                                          transparentDetailPopEnterTransition(coherentFeedbackEnabled)
+                                      },
+                                      popExitTransition = {
+                                          transparentDetailPopExitTransition(coherentFeedbackEnabled)
+                                      }
+                                  ) { backStackEntry ->
+                                      val playlistJson = backStackEntry.arguments
+                                          ?.getString("playlistJson")
+                                      val playlistType = backStackEntry.arguments
+                                          ?.getString("type") ?: "rank"
+                                      val kugouPlaylist = navigationGson.fromJson(
+                                          playlistJson,
+                                          PlaylistSummary::class.java
+                                      )
+                                      RenderNavHostScene(
+                                          Destinations.KugouPlaylistDetail.route
+                                      ) {
+                                          KugouPlaylistDetailScreen(
+                                              playlist = kugouPlaylist,
+                                              playlistType = playlistType,
+                                              onBack = { navController.popBackStack() },
+                                              onSongClick = { songs, index ->
+                                                  playSongsAndOpenNowPlaying(
+                                                      songs = songs,
+                                                      index = index,
+                                                      sourceRoute = kugouPlaylistSourceRoute(kugouPlaylist, playlistType)
+                                                  )
+                                              },
+                                              offlineMode = offlineMode
+                                          )
+                                      }
+                                  }
                                 composable(
                                     route = Destinations.BiliPlaylistDetail.route,
                                     arguments = listOf(navArgument("playlistJson") {
@@ -4745,3 +4749,7 @@ private fun NeriAppContent(
         }
     }
 }
+
+
+
+

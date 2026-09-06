@@ -214,6 +214,14 @@ class KugouApiProbeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 用户歌单列表 */
+    fun getUserPlaylistsAndCopy() {
+        launchAndCopy("userPlaylists") {
+            val response = wrapper.user.getUserPlaylist(pageSize = 100, page = 1)
+            parseResponseToJson(response)
+        }
+    }
+
     /** 排行榜歌曲 */
     fun getRankAudioAndCopy() {
         val rankId = _ui.value.rankId.trim()
@@ -298,3 +306,4 @@ class KugouApiProbeViewModel(app: Application) : AndroidViewModel(app) {
         return System.currentTimeMillis() - start
     }
 }
+

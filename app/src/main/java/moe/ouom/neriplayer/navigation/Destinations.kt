@@ -78,7 +78,7 @@ sealed class Destinations(val route: String, val labelResId: Int) {
     data object YouTubeMusicPlaylistDetail : Destinations("youtube_music_playlist_detail/{playlistJson}", moe.ouom.neriplayer.R.string.playlist_detail)
 
     // 酷狗歌单详情路由
-    data object KugouPlaylistDetail : Destinations("kugou_playlist_detail/{playlistJson}", moe.ouom.neriplayer.R.string.playlist_detail)
+    data object KugouPlaylistDetail : Destinations("kugou_playlist_detail/{type}/{playlistJson}", moe.ouom.neriplayer.R.string.playlist_detail)
 
     // 本地歌单详情路由
     data object LocalPlaylistDetail : Destinations("local_playlist_detail/{playlistId}", moe.ouom.neriplayer.R.string.playlist_local_detail)
@@ -96,3 +96,4 @@ sealed class Destinations(val route: String, val labelResId: Int) {
         }
     }
 }
+

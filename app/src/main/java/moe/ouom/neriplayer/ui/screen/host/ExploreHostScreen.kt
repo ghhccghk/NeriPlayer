@@ -547,13 +547,14 @@ fun ExploreHostScreen(
                             }
 
                             is ExploreSelectedItem.Kugou -> {
-                                KugouPlaylistDetailScreen(
-                                    playlist = current.playlist,
-                                    onBack = { selected = null },
-                                    onSongClick = onSongClick,
-                                    offlineMode = offlineMode
-                                )
-                            }
+                                  KugouPlaylistDetailScreen(
+                                      playlist = current.playlist,
+                                      playlistType = "rank",
+                                      onBack = { selected = null },
+                                      onSongClick = onSongClick,
+                                      offlineMode = offlineMode
+                                  )
+                              }
                         }
                     }
                 }

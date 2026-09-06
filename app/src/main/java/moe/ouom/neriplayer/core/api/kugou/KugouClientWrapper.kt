@@ -311,9 +311,9 @@ class KugouClientWrapper(
     /**
      * Convenience lyric search that auto-syncs cookies.
      */
-    suspend fun searchLyric(hash: String): KuGouResponse = withContext(Dispatchers.IO) {
+    suspend fun searchLyric(hash: String,albumAudioId: Long = 0L): KuGouResponse = withContext(Dispatchers.IO) {
         invokeWithCookieSync {
-            sdk.search.searchLyric(hash = hash)
+            sdk.search.searchLyric(hash = hash,albumAudioId = albumAudioId)
         }
     }
 

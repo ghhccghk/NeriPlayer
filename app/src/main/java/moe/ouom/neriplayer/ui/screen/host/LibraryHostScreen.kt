@@ -64,6 +64,7 @@ import moe.ouom.neriplayer.ui.screen.playlist.LocalPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteaseAlbumDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.NeteasePlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.BiliPlaylistDetailScreen
+import moe.ouom.neriplayer.ui.screen.playlist.KugouPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.playlist.YouTubeMusicPlaylistDetailScreen
 import moe.ouom.neriplayer.ui.screen.tab.LibraryTab
 import moe.ouom.neriplayer.ui.screen.tab.LibraryScreen
@@ -117,6 +118,8 @@ sealed class LibrarySelectedItem : Parcelable {
     @Parcelize
     data class Bili(val playlist: BiliPlaylist) : LibrarySelectedItem()
     @Parcelize
+    data class Kugou(val playlist: PlaylistSummary) : LibrarySelectedItem()
+    @Parcelize
     data class YouTubeMusic(val playlist: YouTubeMusicPlaylist) : LibrarySelectedItem()
 }
 
@@ -137,6 +140,7 @@ private enum class LibraryScrollSource {
     NeteasePlaylist,
     NeteaseAlbum,
     YouTubeMusic,
+    Kugou,
     Bili
 }
 
@@ -161,6 +165,7 @@ fun LibraryHostScreen(
     neteasePlaylistSourceRoute: (PlaylistSummary) -> String? = { null },
     neteaseAlbumSourceRoute: (AlbumSummary) -> String? = { null },
     biliPlaylistSourceRoute: (BiliPlaylist) -> String? = { null },
+    kugouPlaylistSourceRoute: (PlaylistSummary, String) -> String? = { _, _ -> null },
     localPlaylistSourceRoute: (Long) -> String? = { null },
     onOpenRecent: () -> Unit,
     onOpenStats: () -> Unit = {},
@@ -299,6 +304,9 @@ fun LibraryHostScreen(
     val biliListState = rememberSaveable(saver = biliListSaver) {
         LazyListState(firstVisibleItemIndex = 0, firstVisibleItemScrollOffset = 0)
     }
+    val kugouListState = rememberSaveable(saver = LazyListState.Saver) {
+        LazyListState(firstVisibleItemIndex = 0, firstVisibleItemScrollOffset = 0)
+    }
     val qqMusicListState = rememberSaveable(saver = qqMusicListSaver) {
         LazyListState(firstVisibleItemIndex = 0, firstVisibleItemScrollOffset = 0)
     }
@@ -310,6 +318,7 @@ fun LibraryHostScreen(
         LibraryScrollSource.NeteaseAlbum -> neteaseAlbumState
         LibraryScrollSource.YouTubeMusic -> youtubeMusicListState
         LibraryScrollSource.Bili -> biliListState
+        LibraryScrollSource.Kugou -> kugouListState
     }
 
     fun captureLibraryScrollPosition(source: LibraryScrollSource) {
@@ -422,276 +431,299 @@ fun LibraryHostScreen(
                         ) {
                             libraryStateHolder.SaveableStateProvider("library_screen") {
                                 LibraryScreen(
-                            initialTab = selectedTab,
-                            onTabChange = { selectedTab = it },
-                            localListState = localListState,
-                            favoriteListState = favoriteListState,
-                            neteaseAlbumState = neteaseAlbumState,
-                            neteaseListState = neteaseListState,
-                            youtubeMusicListState = youtubeMusicListState,
-                            biliListState = biliListState,
-                            qqMusicListState = qqMusicListState,
-                            topAppBarState = topAppBarState,
-                            offlineMode = offlineMode,
-                            onLocalPlaylistClick = { playlist ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(LibraryScrollSource.Local)
-                                openLibrarySelectedItem(LibrarySelectedItem.Local(playlist.id))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = playlist.id,
-                                        name = playlist.name,
-                                        picUrl = playlist.displayCoverUrl(context),
-                                        trackCount = playlist.songs.size,
-                                        source = "local"
-                                    )
-                                }
-                            },
-                            onLocalArtistClick = { artist ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(LibraryScrollSource.Local)
-                                openLibrarySelectedItem(LibrarySelectedItem.LocalArtist(artist.name))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = artist.id,
-                                        name = artist.name,
-                                        picUrl = artist.displayCoverUrl(context),
-                                        trackCount = artist.songs.size,
-                                        source = PlaylistUsageRepository.SOURCE_LOCAL_ARTIST
-                                    )
-                                }
-                            },
-                            onHotPlaylistClick = { period ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(LibraryScrollSource.Favorite)
-                                openLibrarySelectedItem(
-                                    LibrarySelectedItem.Hot(
-                                        monthly = period == PlaybackStatsPeriod.MONTH
-                                    )
-                                )
-                            },
-                            onNeteasePlaylistClick = { playlist ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(
-                                    sourceForFavoriteAwareDestination(
-                                        LibraryScrollSource.NeteasePlaylist
-                                    )
-                                )
-                                openLibrarySelectedItem(LibrarySelectedItem.Netease(playlist))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = playlist.id,
-                                        name = playlist.name,
-                                        picUrl = playlist.picUrl,
-                                        trackCount = playlist.trackCount,
-                                        source = "netease"
-                                    )
-                                }
-                            },
-                            onNeteaseAlbumClick = { album ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(
-                                    sourceForFavoriteAwareDestination(
-                                        LibraryScrollSource.NeteaseAlbum
-                                    )
-                                )
-                                openLibrarySelectedItem(LibrarySelectedItem.NeteaseAlbum(album))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = album.id,
-                                        name = album.name,
-                                        picUrl = album.picUrl,
-                                        trackCount = album.size,
-                                        source = "neteaseAlbum"
-                                    )
-                                }
-                            },
-                            onNeteaseArtistClick = { artist ->
-                                captureLibraryScrollPosition(LibraryScrollSource.Favorite)
-                                openNeteaseArtist(artist)
-                            },
-                            onYouTubeMusicPlaylistClick = { playlist ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(
-                                    sourceForFavoriteAwareDestination(
-                                        LibraryScrollSource.YouTubeMusic
-                                    )
-                                )
-                                openLibrarySelectedItem(LibrarySelectedItem.YouTubeMusic(playlist))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = stableYouTubeMusicId(
-                                            playlist.playlistId.ifBlank { playlist.browseId }
-                                        ),
-                                        name = playlist.title,
-                                        picUrl = playlist.coverUrl,
-                                        trackCount = playlist.trackCount,
-                                        source = "youtubeMusic",
-                                        browseId = playlist.browseId,
-                                        playlistId = playlist.playlistId
-                                    )
-                                }
-                            },
-                            onBiliPlaylistClick = { playlist ->
-                                skipDetailCloseAnimation = false
-                                captureLibraryScrollPosition(
-                                    sourceForFavoriteAwareDestination(LibraryScrollSource.Bili)
-                                )
-                                openLibrarySelectedItem(LibrarySelectedItem.Bili(playlist))
-                                AppContainer.launchBackgroundIo {
-                                    AppContainer.playlistUsageRepo.recordOpen(
-                                        id = playlist.mediaId,
-                                        name = playlist.title,
-                                        picUrl = playlist.coverUrl,
-                                        trackCount = playlist.count,
-                                        source = "bili",
-                                        mid = playlist.mid,
-                                        fid = playlist.fid,
-                                        subtype = playlist.kind.name,
-                                        subtitle = playlist.subtitle
-                                    )
-                                }
-                            },
-                            onOpenRecent = onOpenRecent,
-                            onOpenStats = onOpenStats
-                        )
-                        }
-                        }
-                    } else {
-                        when (current) {
-                        is LibrarySelectedItem.Local -> {
-                            LocalPlaylistDetailScreen(
-                                playlistId = current.playlistId,
-                                onBack = { closeSelectedDetail() },
-                                onDeleted = { closeDeletedLocalPlaylist() },
-                                onSongClick = { songs, index ->
-                                    onSongClickWithSourceRoute(
-                                        songs,
-                                        index,
-                                        localPlaylistSourceRoute(current.playlistId)
-                                    )
-                                },
-                                offlineMode = offlineMode
-                            )
-                        }
-
-                        is LibrarySelectedItem.LocalArtist -> {
-                            LocalArtistDetailScreen(
-                                artistName = current.artistName,
-                                onBack = { closeSelectedDetail() },
-                                onSongClick = onSongClick,
-                                offlineMode = offlineMode
-                            )
-                        }
-
-                        is LibrarySelectedItem.Hot -> {
-                            HotPlaylistDetailScreen(
-                                period = current.period(),
-                                onBack = { closeSelectedDetail() },
-                                onSongClick = onSongClick,
-                                offlineMode = offlineMode
-                            )
-                        }
-
-                        is LibrarySelectedItem.NeteaseAlbum -> {
-                            NeteaseAlbumDetailScreen(
-                                onBack = { selected = null },
-                                onSongClick = { songs, index ->
-                                    onSongClickWithSourceRoute(
-                                        songs,
-                                        index,
-                                        neteaseAlbumSourceRoute(current.album)
-                                    )
-                                },
-                                album = current.album,
-                                offlineMode = offlineMode
-                            )
-                        }
-
-                        is LibrarySelectedItem.Netease -> {
-                            NeteasePlaylistDetailScreen(
-                                playlist = current.playlist,
-                                onBack = { selected = null },
-                                onSongClick = { songs, index ->
-                                    onSongClickWithSourceRoute(
-                                        songs,
-                                        index,
-                                        neteasePlaylistSourceRoute(current.playlist)
-                                    )
-                                },
-                                offlineMode = offlineMode
-                            )
-                        }
-
-                        is LibrarySelectedItem.NeteaseArtist -> {
-                            libraryStateHolder.SaveableStateProvider(
-                                "netease_artist_${current.artist.id}"
-                            ) {
-                                NeteaseArtistDetailScreen(
-                                    artist = current.artist,
-                                    onBack = { selected = null },
-                                    onSongClick = onSongClick,
+                                    initialTab = selectedTab,
+                                    onTabChange = { selectedTab = it },
+                                    localListState = localListState,
+                                    favoriteListState = favoriteListState,
+                                    neteaseAlbumState = neteaseAlbumState,
+                                    neteaseListState = neteaseListState,
+                                    youtubeMusicListState = youtubeMusicListState,
+                                    biliListState = biliListState,
+                                    kugouListState = kugouListState,
+                                    qqMusicListState = qqMusicListState,
+                                    topAppBarState = topAppBarState,
                                     offlineMode = offlineMode,
-                                    onAlbumClick = { album ->
+                                    onLocalPlaylistClick = { playlist ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(LibraryScrollSource.Local)
+                                        openLibrarySelectedItem(LibrarySelectedItem.Local(playlist.id))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = playlist.id,
+                                                name = playlist.name,
+                                                picUrl = playlist.displayCoverUrl(context),
+                                                trackCount = playlist.songs.size,
+                                                source = "local"
+                                            )
+                                        }
+                                    },
+                                    onLocalArtistClick = { artist ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(LibraryScrollSource.Local)
+                                        openLibrarySelectedItem(LibrarySelectedItem.LocalArtist(artist.name))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = artist.id,
+                                                name = artist.name,
+                                                picUrl = artist.displayCoverUrl(context),
+                                                trackCount = artist.songs.size,
+                                                source = PlaylistUsageRepository.SOURCE_LOCAL_ARTIST
+                                            )
+                                        }
+                                    },
+                                    onHotPlaylistClick = { period ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(LibraryScrollSource.Favorite)
                                         openLibrarySelectedItem(
-                                            LibrarySelectedItem.NeteaseArtistAlbum(
-                                                current.artist,
-                                                album
+                                            LibrarySelectedItem.Hot(
+                                                monthly = period == PlaybackStatsPeriod.MONTH
                                             )
                                         )
-                                    }
+                                    },
+                                    onNeteasePlaylistClick = { playlist ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(
+                                            sourceForFavoriteAwareDestination(
+                                                LibraryScrollSource.NeteasePlaylist
+                                            )
+                                        )
+                                        openLibrarySelectedItem(LibrarySelectedItem.Netease(playlist))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = playlist.id,
+                                                name = playlist.name,
+                                                picUrl = playlist.picUrl,
+                                                trackCount = playlist.trackCount,
+                                                source = "netease"
+                                            )
+                                        }
+                                    },
+                                    onNeteaseAlbumClick = { album ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(
+                                            sourceForFavoriteAwareDestination(
+                                                LibraryScrollSource.NeteaseAlbum
+                                            )
+                                        )
+                                        openLibrarySelectedItem(LibrarySelectedItem.NeteaseAlbum(album))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = album.id,
+                                                name = album.name,
+                                                picUrl = album.picUrl,
+                                                trackCount = album.size,
+                                                source = "neteaseAlbum"
+                                            )
+                                        }
+                                    },
+                                    onNeteaseArtistClick = { artist ->
+                                        captureLibraryScrollPosition(LibraryScrollSource.Favorite)
+                                        openNeteaseArtist(artist)
+                                    },
+                                    onYouTubeMusicPlaylistClick = { playlist ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(
+                                            sourceForFavoriteAwareDestination(
+                                                LibraryScrollSource.YouTubeMusic
+                                            )
+                                        )
+                                        openLibrarySelectedItem(LibrarySelectedItem.YouTubeMusic(playlist))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = stableYouTubeMusicId(
+                                                    playlist.playlistId.ifBlank { playlist.browseId }
+                                                ),
+                                                name = playlist.title,
+                                                picUrl = playlist.coverUrl,
+                                                trackCount = playlist.trackCount,
+                                                source = "youtubeMusic",
+                                                browseId = playlist.browseId,
+                                                playlistId = playlist.playlistId
+                                            )
+                                        }
+                                    },
+                                    onBiliPlaylistClick = { playlist ->
+                                        skipDetailCloseAnimation = false
+                                        captureLibraryScrollPosition(
+                                            sourceForFavoriteAwareDestination(LibraryScrollSource.Bili)
+                                        )
+                                        openLibrarySelectedItem(LibrarySelectedItem.Bili(playlist))
+                                        AppContainer.launchBackgroundIo {
+                                            AppContainer.playlistUsageRepo.recordOpen(
+                                                id = playlist.mediaId,
+                                                name = playlist.title,
+                                                picUrl = playlist.coverUrl,
+                                                trackCount = playlist.count,
+                                                source = "bili",
+                                                mid = playlist.mid,
+                                                fid = playlist.fid,
+                                                subtype = playlist.kind.name,
+                                                subtitle = playlist.subtitle
+                                            )
+                                        }
+                                    },
+                                      onKugouPlaylistClick = { playlist ->
+                                          skipDetailCloseAnimation = false
+                                          captureLibraryScrollPosition(
+                                              sourceForFavoriteAwareDestination(LibraryScrollSource.Kugou)
+                                          )
+                                          openLibrarySelectedItem(LibrarySelectedItem.Kugou(playlist))
+                                      },
+                                    onOpenRecent = onOpenRecent,
+                                    onOpenStats = onOpenStats
                                 )
                             }
                         }
+                    } else {
+                        when (current) {
+                            is LibrarySelectedItem.Local -> {
+                                LocalPlaylistDetailScreen(
+                                    playlistId = current.playlistId,
+                                    onBack = { closeSelectedDetail() },
+                                    onDeleted = { closeDeletedLocalPlaylist() },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            localPlaylistSourceRoute(current.playlistId)
+                                        )
+                                    },
+                                    offlineMode = offlineMode
+                                )
+                            }
 
-                        is LibrarySelectedItem.NeteaseArtistAlbum -> {
-                            NeteaseAlbumDetailScreen(
-                                onBack = {
-                                    selected = LibrarySelectedItem.NeteaseArtist(current.artist)
-                                },
-                                onSongClick = { songs, index ->
-                                    onSongClickWithSourceRoute(
-                                        songs,
-                                        index,
-                                        neteaseAlbumSourceRoute(current.album)
+                            is LibrarySelectedItem.LocalArtist -> {
+                                LocalArtistDetailScreen(
+                                    artistName = current.artistName,
+                                    onBack = { closeSelectedDetail() },
+                                    onSongClick = onSongClick,
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is LibrarySelectedItem.Hot -> {
+                                HotPlaylistDetailScreen(
+                                    period = current.period(),
+                                    onBack = { closeSelectedDetail() },
+                                    onSongClick = onSongClick,
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is LibrarySelectedItem.NeteaseAlbum -> {
+                                NeteaseAlbumDetailScreen(
+                                    onBack = { selected = null },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            neteaseAlbumSourceRoute(current.album)
+                                        )
+                                    },
+                                    album = current.album,
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is LibrarySelectedItem.Netease -> {
+                                NeteasePlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    onBack = { selected = null },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            neteasePlaylistSourceRoute(current.playlist)
+                                        )
+                                    },
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is LibrarySelectedItem.NeteaseArtist -> {
+                                libraryStateHolder.SaveableStateProvider(
+                                    "netease_artist_${current.artist.id}"
+                                ) {
+                                    NeteaseArtistDetailScreen(
+                                        artist = current.artist,
+                                        onBack = { selected = null },
+                                        onSongClick = onSongClick,
+                                        offlineMode = offlineMode,
+                                        onAlbumClick = { album ->
+                                            openLibrarySelectedItem(
+                                                LibrarySelectedItem.NeteaseArtistAlbum(
+                                                    current.artist,
+                                                    album
+                                                )
+                                            )
+                                        }
                                     )
-                                },
-                                album = current.album,
-                                offlineMode = offlineMode
-                            )
-                        }
+                                }
+                            }
 
-                        is LibrarySelectedItem.YouTubeMusic -> {
-                            YouTubeMusicPlaylistDetailScreen(
-                                playlist = current.playlist,
-                                onBack = { selected = null },
-                                onSongClick = onSongClick,
-                                offlineMode = offlineMode
-                            )
-                        }
+                            is LibrarySelectedItem.NeteaseArtistAlbum -> {
+                                NeteaseAlbumDetailScreen(
+                                    onBack = {
+                                        selected = LibrarySelectedItem.NeteaseArtist(current.artist)
+                                    },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            neteaseAlbumSourceRoute(current.album)
+                                        )
+                                    },
+                                    album = current.album,
+                                    offlineMode = offlineMode
+                                )
+                            }
 
-                        is LibrarySelectedItem.Bili -> {
-                            BiliPlaylistDetailScreen(
-                                playlist = current.playlist,
-                                onBack = { selected = null },
-                                onPlayAudio = { videos, index ->
-                                    onPlayBiliAudioWithSourceRoute(
-                                        videos,
-                                        index,
-                                        biliPlaylistSourceRoute(current.playlist)
-                                    )
-                                },
+                            is LibrarySelectedItem.YouTubeMusic -> {
+                                YouTubeMusicPlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    onBack = { selected = null },
+                                    onSongClick = onSongClick,
+                                    offlineMode = offlineMode
+                                )
+                            }
+
+                            is LibrarySelectedItem.Bili -> {
+                                BiliPlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    onBack = { selected = null },
+                                    onPlayAudio = { videos, index ->
+                                        onPlayBiliAudioWithSourceRoute(
+                                            videos,
+                                            index,
+                                            biliPlaylistSourceRoute(current.playlist)
+                                        )
+                                    },
                                     onPlayParts = { videoInfo, index, coverUrl ->
                                         onPlayBiliPartsWithSourceRoute(
-                                        videoInfo,
-                                        index,
-                                        coverUrl,
+                                            videoInfo,
+                                            index,
+                                            coverUrl,
                                             biliPlaylistSourceRoute(current.playlist)
                                         )
                                     },
                                     offlineMode = offlineMode
                                 )
-                        }
+                            }
+                            is LibrarySelectedItem.Kugou -> {
+                                KugouPlaylistDetailScreen(
+                                    playlist = current.playlist,
+                                    playlistType = "user",
+                                    onBack = { selected = null },
+                                    onSongClick = { songs, index ->
+                                        onSongClickWithSourceRoute(
+                                            songs,
+                                            index,
+                                            kugouPlaylistSourceRoute(current.playlist, "user")
+                                        )
+                                    },
+                                    offlineMode = offlineMode
+                                )
+                            }
                         }
                     }
                 }
@@ -739,6 +771,10 @@ private val librarySelectedItemSaver = mapSaver<LibrarySelectedItem?>(
                 "type" to "bili",
                 "playlist" to item.playlist.toSaveMap()
             )
+            is LibrarySelectedItem.Kugou -> hashMapOf(
+                "type" to "kugou",
+                "playlist" to item.playlist.toSaveMap()
+            )
             is LibrarySelectedItem.YouTubeMusic -> hashMapOf(
                 "type" to "ytmusic",
                 "playlist" to item.playlist.toSaveMap()
@@ -772,6 +808,7 @@ private val librarySelectedItemSaver = mapSaver<LibrarySelectedItem?>(
                 }
             }
             "bili" -> restoreBiliPlaylist(saved["playlist"] as? Map<*, *>)?.let { LibrarySelectedItem.Bili(it) }
+            "kugou" -> restorePlaylistSummary(saved["playlist"] as? Map<*, *>)?.let { LibrarySelectedItem.Kugou(it) }
             "ytmusic" -> restoreYouTubeMusicPlaylist(saved["playlist"] as? Map<*, *>)?.let { LibrarySelectedItem.YouTubeMusic(it) }
             else -> null
         }
