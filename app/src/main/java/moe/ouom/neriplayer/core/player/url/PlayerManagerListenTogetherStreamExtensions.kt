@@ -1,26 +1,27 @@
 package moe.ouom.neriplayer.core.player.url
 
-import java.security.MessageDigest
-import kotlin.math.abs
 import moe.ouom.neriplayer.core.player.PlayerManager
 import moe.ouom.neriplayer.core.player.model.PlaybackAudioInfo
 import moe.ouom.neriplayer.core.player.model.PlaybackAudioSource
 import moe.ouom.neriplayer.core.player.model.PlaybackQualityOption
 import moe.ouom.neriplayer.core.player.model.PlaybackUrlCandidate
+import moe.ouom.neriplayer.core.player.model.SongUrlResult
 import moe.ouom.neriplayer.core.player.quality.effectiveBiliQuality
+import moe.ouom.neriplayer.core.player.quality.effectiveKuGouQuality
 import moe.ouom.neriplayer.core.player.quality.effectiveNeteaseQuality
 import moe.ouom.neriplayer.core.player.quality.effectiveYouTubeQuality
-import moe.ouom.neriplayer.core.player.model.SongUrlResult
+import moe.ouom.neriplayer.core.player.watchdog.currentPlaybackCandidate
 import moe.ouom.neriplayer.data.model.SongItem
 import moe.ouom.neriplayer.data.model.stableKey
 import moe.ouom.neriplayer.listentogether.mapping.MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
-import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherChannels
 import moe.ouom.neriplayer.listentogether.mapping.toSongItem
-import moe.ouom.neriplayer.listentogether.playback.currentTrack
 import moe.ouom.neriplayer.listentogether.mapping.trustedListenTogetherStreamUrls
+import moe.ouom.neriplayer.listentogether.playback.currentTrack
 import moe.ouom.neriplayer.listentogether.playback.sameTrackAs
+import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherChannels
 import moe.ouom.neriplayer.listentogether.protocol.ListenTogetherRoomStatuses
-import moe.ouom.neriplayer.core.player.watchdog.currentPlaybackCandidate
+import java.security.MessageDigest
+import kotlin.math.abs
 
 internal const val LISTEN_TOGETHER_STREAM_CACHE_KEY_PREFIX = "listen-together-stream"
 private const val LISTEN_TOGETHER_QUALITY_FRAGMENT_KEY = "neriplayer-ltw-quality="
@@ -194,6 +195,7 @@ internal fun listenTogetherQualityRank(
         PlaybackAudioSource.NETEASE -> NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.BILIBILI -> BILI_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.YOUTUBE_MUSIC -> YOUTUBE_LISTEN_TOGETHER_QUALITY_ORDER
+        PlaybackAudioSource.KUGOU -> KUGOU_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.LOCAL -> emptyList()
     }.indexOf(normalized).takeIf { it >= 0 }
 }
@@ -223,6 +225,9 @@ private fun normalizeListenTogetherQualityKey(
         PlaybackAudioSource.YOUTUBE_MUSIC -> normalized.takeIf {
             it in YOUTUBE_LISTEN_TOGETHER_QUALITY_ORDER
         }
+        PlaybackAudioSource.KUGOU ->normalized.takeIf {
+            it in KUGOU_LISTEN_TOGETHER_QUALITY_ORDER
+        }
         PlaybackAudioSource.LOCAL -> null
     }
 }
@@ -232,6 +237,7 @@ private fun listenTogetherSourceKey(source: PlaybackAudioSource): String {
         PlaybackAudioSource.NETEASE -> "netease"
         PlaybackAudioSource.BILIBILI -> "bili"
         PlaybackAudioSource.YOUTUBE_MUSIC -> "youtube"
+        PlaybackAudioSource.KUGOU -> "kugou"
         PlaybackAudioSource.LOCAL -> "local"
     }
 }
@@ -262,6 +268,18 @@ private val YOUTUBE_LISTEN_TOGETHER_QUALITY_ORDER = listOf(
     "high",
     "very_high"
 )
+
+private val KUGOU_LISTEN_TOGETHER_QUALITY_ORDER = listOf(
+    "128",
+    "320" ,
+    "flac" ,
+    "high" ,
+    "viper_atmos",
+    "viper_clear" ,
+    "viper_tape" ,
+    "super",
+)
+
 
 internal fun isShareableListenTogetherStreamResolution(result: SongUrlResult): Boolean {
     return shareableListenTogetherStreamUrls(result).isNotEmpty()
@@ -338,6 +356,7 @@ internal fun PlayerManager.listenTogetherFallbackResult(song: SongItem): SongUrl
         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
+        PlaybackAudioSource.KUGOU -> effectiveKuGouQuality()
         PlaybackAudioSource.LOCAL -> ""
     }
     val legacyAudioInfo = listenTogetherFallbackAudioInfo(song)
@@ -373,6 +392,7 @@ internal fun PlayerManager.listenTogetherPreferredQualityKey(song: SongItem): St
         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
+        PlaybackAudioSource.KUGOU -> effectiveKuGouQuality()
         PlaybackAudioSource.LOCAL -> null
     }
 }
@@ -424,6 +444,17 @@ internal fun buildListenTogetherFallbackAudioInfo(
                 qualityLabel = qualityLabelForBili(qualityKey, getLocalizedString),
                 qualityOptions = LISTEN_TOGETHER_BILI_QUALITY_OPTIONS.map { key ->
                     PlaybackQualityOption(key, qualityLabelForBili(key, getLocalizedString))
+                }
+            )
+        }
+        PlaybackAudioSource.KUGOU -> {
+            val qualityKey = preferredQualityKey.trim().lowercase().ifBlank { "high" }
+            PlaybackAudioInfo(
+                source = PlaybackAudioSource.KUGOU,
+                qualityKey = qualityKey,
+                qualityLabel = qualityLabelForKugou(qualityKey, getLocalizedString),
+                qualityOptions = KUGOU_LISTEN_TOGETHER_QUALITY_ORDER.map { key ->
+                    PlaybackQualityOption(key, qualityLabelForKugou(key, getLocalizedString))
                 }
             )
         }

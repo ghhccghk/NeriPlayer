@@ -245,6 +245,11 @@ internal fun convertKugouKrcToEditableYrc(krc: String): String {
         .joinToString("\n")
 }
 
+
+fun kugouYrc(S: String): String{
+    return convertKugouKrcToEditableYrc(S)
+}
+
 private fun convertKugouKrcLineToEditableYrc(rawLine: String): String? {
     val line = rawLine.trim()
     val header = KUGOU_KRC_LINE_REGEX.find(line) ?: return null

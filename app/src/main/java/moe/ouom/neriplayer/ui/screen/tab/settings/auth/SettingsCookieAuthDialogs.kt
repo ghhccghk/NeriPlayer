@@ -421,7 +421,7 @@ internal fun SettingsKugouAuthDialogs(
             inlineMsg = inlineMsg,
             onInlineMsgChange = onInlineMsgChange,
             onDismiss = onDismissSheet,
-            browserTabLabel = stringResource(R.string.login),
+            browserTabLabel = stringResource(R.string.login_title),
             browserButtonLabel = "打开登录界面",
             browserHintContent = {},
             cookieLabel = "粘贴 Cookie（key=value 格式，每行一对）",

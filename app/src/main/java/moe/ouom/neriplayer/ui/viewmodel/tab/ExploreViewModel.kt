@@ -27,6 +27,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -529,9 +530,13 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
                         matchQuery = matchQuery,
                         page = nextPage
                     )
+                    SearchSource.KUGOU -> fetchKugouSearchPage(
+                        keyword = keyword,
+                        matchQuery = matchQuery,
+                        page = nextPage
+                    )
                     SearchSource.YOUTUBE_MUSIC,
-                    SearchSource.LINK_RECOGNITION,
-                    SearchSource.KUGOU -> return@launch
+                    SearchSource.LINK_RECOGNITION -> return@launch
                 }
                 if (source == SearchSource.NETEASE && !isNeteaseSearchAllowed()) {
                     clearNeteaseSearchForAuthRequired()
@@ -620,59 +625,24 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
     private fun searchKugou(keyword: String, matchQuery: String, requestVersion: Long) {
         searchJob = viewModelScope.launch {
             try {
-                val results = withContext(Dispatchers.IO) {
-                    AppContainer.kugouSearchApi.search(keyword, page = 1)
-                }
-
-                // 并发获取详细信息（主要是封面）
-                val songs = results.map { info ->
-                    async(Dispatchers.IO) {
-                        try {
-                            val details = AppContainer.kugouSearchApi.getSongInfo(info.id)
-                            val infoDeferred = async { AppContainer.kugouClient.getPrivilegeLite(info.id) }
-                            val infoResponse = infoDeferred.await()
-                            val data = infoResponse.body["data"]?.jsonArray?.get(0)?.jsonObject
-                                ?: throw IOException("Empty response for ${info.id}")
-
-                            val album_id = data["album_audio_id"]?.jsonPrimitive?.content?.toLongOrNull() ?: stableKugouSongId(info.id)
-                            SongItem(
-                                id = stableKugouSongId(info.id),
-                                name = info.songName,
-                                artist = details.singer,
-                                album = details.album,
-                                albumId = album_id ,
-                                matchedLyric = details.lyric,
-                                durationMs = parseDurationToMs(info.duration),
-                                coverUrl = info.coverUrl,
-                                channelId = "kugou",
-                                audioId = info.id
-                            )
-                        } catch (e: Exception) {
-                            // 降级：如果获取详情失败，保留基本信息
-                            SongItem(
-                                id = stableKugouSongId(info.id),
-                                name = info.songName,
-                                artist = info.singer,
-                                album = (info.albumName ?: "").let { "${KUGOU_ALBUM_PREFIX}$it" },
-                                albumId = stableKugouSongId(info.id),
-                                durationMs = parseDurationToMs(info.duration),
-                                coverUrl = info.coverUrl,
-                                channelId = "kugou",
-                                audioId = info.id
-                            )
-                        }
-                    }
-                }.awaitAll()
+                val result = fetchKugouSearchPage(
+                    keyword = keyword,
+                    matchQuery = matchQuery,
+                    page = 1
+                )
 
                 NPLogger.d(
                     TAG,
-                    "search Kugou success: request=$requestVersion, keyword=$keyword, count=${songs.size}"
+                    "search Kugou success: request=$requestVersion, keyword=$keyword, count=${result.songs.size}"
                 )
                 updateSearchStateIfCurrent(requestVersion, SearchSource.KUGOU) {
                     it.copy(
                         searching = false,
                         searchError = null,
-                        searchResults = songs
+                        searchResults = result.songs,
+                        searchItems = result.items,
+                        searchPage = result.page,
+                        searchHasMore = result.hasMore
                     )
                 }
             } catch (e: CancellationException) {
@@ -709,6 +679,76 @@ class ExploreViewModel(application: Application) : AndroidViewModel(application)
             0L
         }
     }
+
+    private suspend fun fetchKugouSearchPage(
+        keyword: String,
+        matchQuery: String,
+        page: Int
+    ): ExploreSearchFetchResult {
+        val result = withContext(Dispatchers.IO) {
+            AppContainer.kugouSearchApi.searchPage(keyword = keyword, page = page)
+        }
+
+        // 并发获取详细信息（主要是封面）
+        val songs = coroutineScope {
+            result.items.map { info ->
+                async(Dispatchers.IO) {
+                    try {
+                        val details = AppContainer.kugouSearchApi.getSongInfo(info.id)
+                        val infoDeferred = async { AppContainer.kugouClient.getPrivilegeLite(info.id) }
+                        val infoResponse = infoDeferred.await()
+                        val data = infoResponse.body["data"]?.jsonArray?.get(0)?.jsonObject
+                            ?: throw IOException("Empty response for ${info.id}")
+
+                        val album_id = data["album_audio_id"]?.jsonPrimitive?.content?.toLongOrNull() ?: stableKugouSongId(info.id)
+                        SongItem(
+                            id = stableKugouSongId(info.id),
+                            name = info.songName,
+                            artist = details.singer,
+                            album = details.album,
+                            albumId = album_id ,
+                            matchedLyric = details.lyric,
+                            durationMs = parseDurationToMs(info.duration),
+                            coverUrl = info.coverUrl,
+                            channelId = "kugou",
+                            audioId = info.id
+                        )
+                    } catch (e: Exception) {
+                        // 降级：如果获取详情失败，保留基本信息
+                        SongItem(
+                            id = stableKugouSongId(info.id),
+                            name = info.songName,
+                            artist = info.singer,
+                            album = (info.albumName ?: "").let { "${KUGOU_ALBUM_PREFIX}$it" },
+                            albumId = stableKugouSongId(info.id),
+                            durationMs = parseDurationToMs(info.duration),
+                            coverUrl = info.coverUrl,
+                            channelId = "kugou",
+                            audioId = info.id
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+
+        val rankedSongs = rankExploreSongSearchResults(
+            query = matchQuery,
+            songs = songs
+        )
+        val items = rankedSongs.map { ExploreSearchResult.Song(it) }
+        val loadedCount = (page - 1).coerceAtLeast(0) * 30 + items.size
+        return ExploreSearchFetchResult(
+            items = items,
+            page = page,
+            hasMore = hasMoreExploreSearchResults(
+                totalCount = result.total.toInt(),
+                loadedCount = loadedCount,
+                pageItemCount = items.size,
+                pageSize = 30
+            )
+        )
+    }
+
 
     private suspend fun fetchBilibiliSearchPage(
         keyword: String,

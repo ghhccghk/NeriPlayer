@@ -32,12 +32,20 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import moe.ouom.neriplayer.core.api.kugou.KugouClientWrapper
+import moe.ouom.neriplayer.core.api.lyrics.kugouYrc
 import moe.ouom.neriplayer.core.player.PlayerManager
 import java.io.IOException
 
 class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
 
     override suspend fun search(keyword: String, page: Int): List<SongSearchInfo> {
+        return searchPage(keyword = keyword, page = page).items
+    }
+
+    /**
+     * 分页搜索酷狗歌曲，附带总数与页码信息。
+     */
+    suspend fun searchPage(keyword: String, page: Int): KugouSearchPageResult {
         return withContext(Dispatchers.IO) {
             val response = client.searchSongs(
                 keywords = keyword,
@@ -45,20 +53,25 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
             )
 
             if (response.status != 200) {
-                return@withContext emptyList()
+                return@withContext KugouSearchPageResult(items = emptyList(), page = page, total = 0)
             }
 
-            val data = response.body["data"]?.jsonObject ?: return@withContext emptyList()
-            val info = data["lists"]?.jsonArray ?: return@withContext emptyList()
+            val data = response.body["data"]?.jsonObject
+                ?: return@withContext KugouSearchPageResult(items = emptyList(), page = page, total = 0)
+            val info = data["lists"]?.jsonArray
+                ?: return@withContext KugouSearchPageResult(items = emptyList(), page = page, total = 0)
+            val total = data["total"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
 
-            info.mapNotNull { item ->
+            val items = info.mapNotNull { item ->
                 val song = item.jsonObject
                 val hash = song["FileHash"]?.jsonPrimitive?.content ?: return@mapNotNull null
                 val songName = song["OriSongName"]?.jsonPrimitive?.content ?: "Unknown"
                 val singer = song["SingerName"]?.jsonPrimitive?.content ?: "Unknown"
                 val albumName = song["AlbumName"]?.jsonPrimitive?.content
                 val coverUrl = song["Image"]?.jsonPrimitive?.content?.replace("/{size}/", "/")
-                val duration = song["duration"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                        ?: song["trans_param"]?.jsonObject?.get("union_cover")?.jsonPrimitive?.content?.replace("/{size}/", "/")
+                val duration = song["Duration"]?.jsonPrimitive?.content?.toLongOrNull()
+                    ?: song["duration"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
 
                 SongSearchInfo(
                     id = hash,
@@ -70,6 +83,12 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                     coverUrl = coverUrl
                 )
             }
+
+            KugouSearchPageResult(
+                items = items,
+                page = page,
+                total = total
+            )
         }
     }
 
@@ -101,7 +120,7 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
                     singer = singer,
                     album = "${PlayerManager.KuGou_SOURCE_TAG}$album",
                     coverUrl = coverUrl,
-                    lyric = lyric,
+                    lyric = if (lyric != null) kugouYrc(lyric) else null,
                     translatedLyric = null
                 )
             }
@@ -133,3 +152,11 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
         return String.format("%d:%02d", minutes, remainingSeconds)
     }
 }
+
+
+/** 酷狗分页搜索结果 */
+data class KugouSearchPageResult(
+    val items: List<SongSearchInfo>,
+    val page: Int,
+    val total: Long
+)

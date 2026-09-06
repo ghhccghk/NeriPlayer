@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="platform_kugou">Kugou Music</string>
+    <string name="debug_kugou_api">Kugou API Debug</string>
+    <string name="debug_kugou_api_desc">Search / Song Details / Play URL / Lyrics / Charts</string>
+    <string name="debug_kugou_probe">Kugou API Probe</string>
+    <string name="debug_kugou_probe_desc">Click the button to make a real request to the Kugou API and copy the raw JSON to the clipboard</string>
+    <string name="debug_kugou_probe_section_auth">Authentication Status</string>
+    <string name="debug_kugou_probe_section_inputs">Debug Parameters</string>
+    <string name="debug_kugou_probe_section_actions">Debug Actions</string>
+    <string name="debug_kugou_probe_section_result">Debug Result</string>
+    <string name="debug_kugou_probe_auth_missing">Not logged in (no valid Cookie)</string>
+    <string name="debug_kugou_probe_auth_logged_in">Logged in | Number of Cookie Keys: %1$d</string>
+    <string name="debug_kugou_probe_input_keyword">Search Keyword</string>
+    <string name="debug_kugou_probe_input_hash">Song Hash</string>
+    <string name="debug_kugou_probe_input_quality">Audio Quality (e.g., 128, 320, flac)</string>
+    <string name="debug_kugou_probe_input_rank_id">Chart ID</string>
+    <string name="debug_kugou_probe_action_search">Search Songs (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_privilege">Song Privilege Information (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_song_info">Song Audio Information (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_song_url">Get Play URL (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_lyric_search">Search Lyrics (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_rank_list">Chart List (Copy JSON)</string>
+    <string name="debug_kugou_probe_action_rank_audio">Chart Songs (Copy JSON)</string>
+    <string name="debug_kugou_probe_keyword_required">Please fill in the search keyword first</string>
+    <string name="debug_kugou_probe_hash_required">Please fill in the song hash first</string>
+    <string name="debug_kugou_probe_rank_required">Please fill in the chart ID first</string>
+    <string name="debug_kugou_probe_summary_empty">This will display the debug summary for the Kugou API</string>
+    <string name="debug_kugou_probe_raw_empty">This will display the raw JSON returned by the API</string>
+    <string name="settings_mobile_data_kugou_audio_quality">Kugou Mobile Data Audio Quality</string>
+    <string name="quality_kugou_default">Kugou Default Audio Quality</string>
+    <string name="settings_audio_quality_viper_atmos">Viper Atmos</string>
+    <string name="settings_audio_quality_viper_clear">Viper Clear</string>
+    <string name="settings_audio_quality_viper_tape">Viper Tape</string>
+    <string name="settings_audio_quality_super">DSD Format Audio</string>
+    <string name="settings_kugou_audio_quality">Kugou Audio Quality</string>
+</resources>
