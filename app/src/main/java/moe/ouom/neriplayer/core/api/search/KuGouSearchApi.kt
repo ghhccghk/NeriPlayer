@@ -139,7 +139,7 @@ class KuGouSearchApi(private val client: KugouClientWrapper) : SearchApi {
         val id = candidate["id"]?.jsonPrimitive?.content ?: return null
         val accessKey = candidate["accesskey"]?.jsonPrimitive?.content ?: return null
 
-        val lyricResponse = client.getLyric(id = id, accessKey = accessKey, decode = true, fmt = "lrc")
+        val lyricResponse = client.getLyric(id = id, accessKey = accessKey, decode = true, fmt = "krc")
         if (lyricResponse.status != 200) return null
 
         return lyricResponse.body["decodeContent"]?.jsonPrimitive?.content
